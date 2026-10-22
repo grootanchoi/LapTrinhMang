@@ -299,6 +299,23 @@ public class ServerMain {
                     return F03_ViewTickets.handleServerGetTicketDetail(packet);
                 }
 
+                case Protocol.CMD_SEARCH_TICKETS: {
+                    if (authenticatedUser == null) return Protocol.Packet.error(packet.command, "Bạn cần đăng nhập.");
+                    return F07_SearchTickets.handle((F07_SearchTickets.SearchRequest) packet.data, authenticatedUser);
+                }
+
+                case Protocol.CMD_GET_STATISTICS: {
+                    return F09_TicketStatistics.handle((F09_TicketStatistics.StatisticsRequest) packet.data, authenticatedUser);
+                }
+
+                case Protocol.CMD_GET_HISTORY: {
+                    return F10_TicketHistoryReview.history((String) packet.data, authenticatedUser);
+                }
+
+                case Protocol.CMD_RATE_TICKET: {
+                    return F10_TicketHistoryReview.review((F10_TicketHistoryReview.ReviewRequest) packet.data, authenticatedUser);
+                }
+
                 case Protocol.CMD_ASSIGN_TECH: {
                     // F04: Phân công kỹ thuật viên
                     Protocol.Packet resp = F04_AssignTechnician.handleServerAssign(packet, broadcaster);

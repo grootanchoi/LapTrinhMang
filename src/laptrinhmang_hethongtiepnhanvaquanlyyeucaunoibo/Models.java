@@ -86,4 +86,28 @@ public class Models {
             this.timestamp = timestamp;
         }
     }
+
+    public static class TicketHistory implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public String action, updatedBy, updatedAt, note;
+        public TicketHistory(String action, String updatedBy, String updatedAt, String note) {
+            this.action = action; this.updatedBy = updatedBy; this.updatedAt = updatedAt; this.note = note;
+        }
+    }
+
+    public static class TicketStatistic implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public String groupName;
+        public int count;
+        public TicketStatistic(String groupName, int count) { this.groupName = groupName; this.count = count; }
+    }
+
+    public static class TicketReview implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public String ticketId, reviewer, comment, createdAt;
+        public int rating;
+        public TicketReview(String ticketId, String reviewer, int rating, String comment, String createdAt) {
+            this.ticketId = ticketId; this.reviewer = reviewer; this.rating = rating; this.comment = comment; this.createdAt = createdAt;
+        }
+    }
 }

@@ -5,6 +5,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -17,7 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class DatabaseManager {
     private static DatabaseManager instance;
     private boolean useMySQL = false;
-    private String dbUrl = "jdbc:mysql://localhost:3306/workdesk_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&useUnicode=true&characterEncoding=UTF-8";
+    private String dbUrl = "jdbc:mariadb://localhost:3306/workdesk_db?connectionCollation=utf8mb4_unicode_ci";
     private String dbUser = "root";
     private String dbPassword = "";
 
@@ -49,7 +50,7 @@ public class DatabaseManager {
         // Yêu cầu mẫu
         Models.Ticket t1 = new Models.Ticket("YC-2026-0001", "Máy in phòng Kế toán không nhận lệnh in", "Hành chính", "Cao",
                 "2026-10-20", "Đang xử lý", "user02", "tech01",
-                "Máy in Canon 2900 báo offline liên tục, đã restart nhưng không được.", 40, "error_printer.txt");
+                "Máy in Canon 2900 báo ngoại tuyến liên tục, đã khởi động lại nhưng không được.", 40, "error_printer.txt");
         Models.Ticket t2 = new Models.Ticket("YC-2026-0002", "Xin cấp quyền truy cập VPN nội bộ", "IT", "Bình thường",
                 "2026-10-21", "Mới", "user01", "Chưa phân công",
                 "Cần tài khoản VPN kết nối máy chủ dữ liệu từ xa.", 0, "");
@@ -60,9 +61,10 @@ public class DatabaseManager {
 
     private void tryConnectMySQL() {
         try {
-            Class.forName("com.mysql.cj.jdbc.Driver");
+            Class.forName("org.mariadb.jdbc.Driver");
             try (Connection conn = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
                 if (conn != null && !conn.isClosed()) {
+                    migrateUserStatusColumn(conn);
                     useMySQL = true;
                     System.out.println("[DatabaseManager] Kết nối MySQL thành công! Sử dụng CSDL: workdesk_db");
                 }
@@ -70,6 +72,14 @@ public class DatabaseManager {
         } catch (Exception e) {
             useMySQL = false;
             System.out.println("[DatabaseManager] Không kết nối được MySQL (" + e.getMessage() + "). Tự động sử dụng Datastore dự phòng tích hợp.");
+        }
+    }
+
+    /** Align older databases whose ENUM status values were imported with a mismatched encoding. */
+    private void migrateUserStatusColumn(Connection conn) throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            st.executeUpdate("ALTER TABLE users MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'Đang hoạt động'");
+            st.executeUpdate("UPDATE users SET status = 'Đang hoạt động' WHERE status IS NULL OR status = ''");
         }
     }
 
@@ -210,6 +220,125 @@ public class DatabaseManager {
         return list;
     }
 
+    // F07: SQL tìm kiếm có tham số và luôn giới hạn theo quyền của tài khoản.
+    public List<Models.Ticket> searchTickets(String username, String role, String keyword, String status, String category, String priority) {
+        String q = keyword == null ? "" : keyword.trim();
+        String st = status == null ? "" : status.trim();
+        String cat = category == null ? "" : category.trim();
+        String pri = priority == null ? "" : priority.trim();
+        if (useMySQL) {
+            StringBuilder sql = new StringBuilder("SELECT * FROM tickets WHERE 1=1");
+            if ("requester".equalsIgnoreCase(role)) sql.append(" AND owner = ?");
+            else if ("tech".equalsIgnoreCase(role)) sql.append(" AND (assigned_tech = ? OR status = 'Mới')");
+            if (!q.isEmpty()) sql.append(" AND (id LIKE ? OR title LIKE ? OR category LIKE ? OR detail LIKE ? OR owner LIKE ? OR assigned_tech LIKE ?)");
+            if (!st.isEmpty()) sql.append(" AND status = ?");
+            if (!cat.isEmpty()) sql.append(" AND category = ?");
+            if (!pri.isEmpty()) sql.append(" AND priority = ?");
+            sql.append(" ORDER BY created_date DESC, id DESC");
+            try (Connection c = getConnection(); PreparedStatement ps = c.prepareStatement(sql.toString())) {
+                int i = 1;
+                if ("requester".equalsIgnoreCase(role) || "tech".equalsIgnoreCase(role)) ps.setString(i++, username);
+                if (!q.isEmpty()) for (int n = 0; n < 6; n++) ps.setString(i++, "%" + q + "%");
+                if (!st.isEmpty()) ps.setString(i++, st);
+                if (!cat.isEmpty()) ps.setString(i++, cat);
+                if (!pri.isEmpty()) ps.setString(i++, pri);
+                try (ResultSet rs = ps.executeQuery()) {
+                    List<Models.Ticket> rows = new ArrayList<>();
+                    while (rs.next()) rows.add(ticketFromResult(rs));
+                    return rows;
+                }
+            } catch (SQLException e) { System.err.println("[F07] Lỗi tìm kiếm MySQL: " + e.getMessage()); return Collections.emptyList(); }
+        }
+        List<Models.Ticket> rows = new ArrayList<>();
+        for (Models.Ticket t : getTicketsForUser(username, role)) {
+            String haystack = (t.id + " " + t.title + " " + t.category + " " + t.detail + " " + t.owner + " " + t.assignedTech).toLowerCase();
+            if ((q.isEmpty() || haystack.contains(q.toLowerCase())) && (st.isEmpty() || st.equals(t.status))
+                    && (cat.isEmpty() || cat.equals(t.category)) && (pri.isEmpty() || pri.equals(t.priority))) rows.add(t);
+        }
+        return rows;
+    }
+
+    // F09: các phép đếm được GROUP BY trực tiếp trong MySQL.
+    public F09_TicketStatistics.Statistics getTicketStatistics(String username, String role, String dateFrom, String dateTo) {
+        List<Models.TicketStatistic> statusRows = new ArrayList<>(), techRows = new ArrayList<>();
+        String from = dateFrom == null ? "" : dateFrom.trim(), to = dateTo == null ? "" : dateTo.trim();
+        if (useMySQL) {
+            String access = "";
+            if ("requester".equalsIgnoreCase(role)) access = " WHERE owner = ?";
+            else if ("tech".equalsIgnoreCase(role)) access = " WHERE (assigned_tech = ? OR status = 'Mới')";
+            if (!from.isEmpty()) access += (access.isEmpty() ? " WHERE" : " AND") + " created_date >= ?";
+            if (!to.isEmpty()) access += (access.isEmpty() ? " WHERE" : " AND") + " created_date <= ?";
+            try (Connection c = getConnection()) {
+                for (String group : new String[]{"status", "assigned_tech"}) {
+                    try (PreparedStatement ps = c.prepareStatement("SELECT " + group + ", COUNT(*) AS total FROM tickets" + access + " GROUP BY " + group + " ORDER BY total DESC")) {
+                        int i = 1;
+                        if ("requester".equalsIgnoreCase(role) || "tech".equalsIgnoreCase(role)) ps.setString(i++, username);
+                        if (!from.isEmpty()) ps.setString(i++, from);
+                        if (!to.isEmpty()) ps.setString(i++, to);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            List<Models.TicketStatistic> out = "status".equals(group) ? statusRows : techRows;
+                            while (rs.next()) out.add(new Models.TicketStatistic(rs.getString(1), rs.getInt(2)));
+                        }
+                    }
+                }
+            } catch (SQLException e) { System.err.println("[F09] Lỗi thống kê MySQL: " + e.getMessage()); }
+        } else {
+            Map<String, Integer> byStatus = new java.util.TreeMap<>(), byTech = new java.util.TreeMap<>();
+            for (Models.Ticket t : getTicketsForUser(username, role)) {
+                if (!from.isEmpty() && t.createdDate.compareTo(from) < 0) continue;
+                if (!to.isEmpty() && t.createdDate.compareTo(to) > 0) continue;
+                byStatus.put(t.status, byStatus.getOrDefault(t.status, 0) + 1);
+                byTech.put(t.assignedTech, byTech.getOrDefault(t.assignedTech, 0) + 1);
+            }
+            byStatus.forEach((k, v) -> statusRows.add(new Models.TicketStatistic(k, v)));
+            byTech.forEach((k, v) -> techRows.add(new Models.TicketStatistic(k, v)));
+        }
+        return new F09_TicketStatistics.Statistics(statusRows, techRows);
+    }
+
+    private Models.Ticket ticketFromResult(ResultSet rs) throws SQLException {
+        return new Models.Ticket(rs.getString("id"), rs.getString("title"), rs.getString("category"), rs.getString("priority"),
+                rs.getString("created_date"), rs.getString("status"), rs.getString("owner"), rs.getString("assigned_tech"),
+                rs.getString("detail"), rs.getInt("progress"), rs.getString("attachment_name"));
+    }
+
+    // F10: lấy timeline và upsert đánh giá một lần cho mỗi yêu cầu.
+    public List<Models.TicketHistory> getTicketHistory(String ticketId) {
+        List<Models.TicketHistory> rows = new ArrayList<>();
+        if (!useMySQL) return rows;
+        String sql = "SELECT action, updated_by, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at, note FROM ticket_history WHERE ticket_id = ? ORDER BY updated_at ASC, id ASC";
+        try (Connection c = getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, ticketId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) rows.add(new Models.TicketHistory(rs.getString("action"), rs.getString("updated_by"), rs.getString("updated_at"), rs.getString("note")));
+            }
+        } catch (SQLException e) { System.err.println("[F10] Lỗi tải lịch sử: " + e.getMessage()); }
+        return rows;
+    }
+
+    public Models.TicketReview getTicketReview(String ticketId) {
+        if (!useMySQL) return null;
+        String sql = "SELECT reviewer, rating, comment, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at FROM ticket_reviews WHERE ticket_id = ?";
+        try (Connection c = getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, ticketId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return new Models.TicketReview(ticketId, rs.getString("reviewer"), rs.getInt("rating"), rs.getString("comment"), rs.getString("created_at"));
+            }
+        } catch (SQLException e) { System.err.println("[F10] Lỗi tải đánh giá: " + e.getMessage()); }
+        return null;
+    }
+
+    public boolean saveTicketReview(String ticketId, String reviewer, int rating, String comment) {
+        if (!useMySQL) return false;
+        String sql = "INSERT INTO ticket_reviews (ticket_id, reviewer, rating, comment) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating=VALUES(rating), comment=VALUES(comment), created_at=CURRENT_TIMESTAMP";
+        try (Connection c = getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, ticketId); ps.setString(2, reviewer); ps.setInt(3, rating); ps.setString(4, comment == null ? "" : comment.trim());
+            boolean saved = ps.executeUpdate() > 0;
+            if (saved) recordHistory(ticketId, "Người gửi đã đánh giá " + rating + "/5", reviewer, comment == null ? "" : comment.trim());
+            return saved;
+        } catch (SQLException e) { System.err.println("[F10] Lỗi lưu đánh giá: " + e.getMessage()); return false; }
+    }
+
     public Models.Ticket getTicketById(String id) {
         if (useMySQL) {
             String sql = "SELECT * FROM tickets WHERE id = ?";
@@ -344,7 +473,7 @@ public class DatabaseManager {
         return list;
     }
 
-    public boolean addUser(Models.User user) {
+    public boolean addUser(Models.User user) throws SQLException {
         if (useMySQL) {
             String sql = "INSERT INTO users (username, password, display_name, role, status) VALUES (?, ?, ?, ?, ?)";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -355,8 +484,13 @@ public class DatabaseManager {
                 ps.setString(5, user.status);
                 return ps.executeUpdate() > 0;
             } catch (SQLException e) {
-                System.err.println("[DatabaseManager] Lỗi thêm user MySQL: " + e.getMessage());
-                return false;
+                // Chỉ coi lỗi khóa UNIQUE/PRIMARY KEY là trùng username.
+                // Các lỗi schema, quyền truy cập hoặc kết nối phải được trả về
+                // đúng nguyên nhân thay vì báo nhầm là tài khoản đã tồn tại.
+                if (e.getErrorCode() == 1062 || "23505".equals(e.getSQLState())) {
+                    return false;
+                }
+                throw e;
             }
         }
         if (localUsers.containsKey(user.username)) return false;

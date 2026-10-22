@@ -95,9 +95,16 @@ public class F08_UserManagement {
         }
 
         DatabaseManager db = DatabaseManager.getInstance();
-        boolean ok = db.addUser(newUser);
+        boolean ok;
+        try {
+            ok = db.addUser(newUser);
+        } catch (java.sql.SQLException e) {
+            System.err.println("[F08] Lỗi SQL khi thêm tài khoản: " + e.getMessage());
+            return Protocol.Packet.error(Protocol.CMD_ADD_USER,
+                    "Không thể lưu tài khoản vào cơ sở dữ liệu: " + e.getMessage());
+        }
         if (!ok) {
-            return Protocol.Packet.error(Protocol.CMD_ADD_USER, "Tên đăng nhập '" + newUser.username + "' đã tồn tại trong hệ thống.");
+            return Protocol.Packet.error(Protocol.CMD_ADD_USER, "Tên đăng nhập '" + newUser.username + "' đã tồn tại trong cơ sở dữ liệu.");
         }
 
         return Protocol.Packet.success(Protocol.CMD_ADD_USER, "Thêm tài khoản thành công: " + newUser.username, null);

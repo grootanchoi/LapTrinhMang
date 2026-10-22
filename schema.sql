@@ -5,6 +5,7 @@
 
 CREATE DATABASE IF NOT EXISTS `workdesk_db` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE `workdesk_db`;
+SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- 1. Bảng người dùng (Users) - F01, F08
 CREATE TABLE IF NOT EXISTS `users` (
@@ -12,7 +13,7 @@ CREATE TABLE IF NOT EXISTS `users` (
     `password` VARCHAR(100) NOT NULL,
     `display_name` VARCHAR(100) NOT NULL,
     `role` ENUM('requester', 'tech', 'admin') NOT NULL DEFAULT 'requester',
-    `status` ENUM('Đang hoạt động', 'Đã khóa') NOT NULL DEFAULT 'Đang hoạt động',
+    `status` VARCHAR(30) NOT NULL DEFAULT 'Đang hoạt động',
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -42,6 +43,23 @@ CREATE TABLE IF NOT EXISTS `ticket_history` (
     `note` TEXT,
     FOREIGN KEY (`ticket_id`) REFERENCES `tickets`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- F10: Đánh giá sau khi hoàn thành yêu cầu
+CREATE TABLE IF NOT EXISTS `ticket_reviews` (
+    `ticket_id` VARCHAR(30) NOT NULL PRIMARY KEY,
+    `reviewer` VARCHAR(50) NOT NULL,
+    `rating` TINYINT NOT NULL,
+    `comment` TEXT,
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT `fk_review_ticket` FOREIGN KEY (`ticket_id`) REFERENCES `tickets`(`id`) ON DELETE CASCADE,
+    CONSTRAINT `chk_review_rating` CHECK (`rating` BETWEEN 1 AND 5)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Chuẩn hóa dữ liệu cũ khi chạy lại script; tránh cột cũ còn charset khác.
+ALTER TABLE `users` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+ALTER TABLE `tickets` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+ALTER TABLE `ticket_history` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+ALTER TABLE `ticket_reviews` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- Thêm tài khoản mẫu ban đầu:
 -- Admin: admin / admin123

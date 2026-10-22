@@ -1,7 +1,7 @@
 # HỆ THỐNG TIẾP NHẬN VÀ QUẢN LÝ YÊU CẦU NỘI BỘ (WORKDESK)
 ## ĐỒ ÁN LẬP TRÌNH MẠNG MÁY TÍNH - MÔ HÌNH CLIENT/SERVER TCP SOCKET
 
-Dự án được xây dựng và chuẩn hóa theo đúng yêu cầu phân tách từng file độc lập cho từng chức năng **F01, F02, F03, F04, F05, F06, F08** dựa trên nền tảng TCP Socket, cơ sở dữ liệu MySQL và kiến trúc đa luồng (Multi-threading).
+Dự án được xây dựng và chuẩn hóa theo đúng yêu cầu phân tách từng file độc lập cho từng chức năng **F01-F10** (bao gồm các chức năng đã đăng ký) dựa trên nền tảng TCP Socket, cơ sở dữ liệu MySQL và kiến trúc đa luồng (Multi-threading).
 
 ---
 
@@ -15,7 +15,10 @@ Dự án được xây dựng và chuẩn hóa theo đúng yêu cầu phân tác
 | **F04** | `F04_AssignTechnician.java` | Server kiểm tra quyền và trạng thái yêu cầu, phân công kỹ thuật viên. Xử lý truyền nhận tệp tin đính kèm qua Socket TCP stream. | **Tên file / File đã tải** |
 | **F05** | `F05_UpdateProgress.java` | Server xác thực quyền KTV, cập nhật trạng thái mới (Đang xử lý, Hoàn thành, Đã hủy), cập nhật tiến độ (0% - 100%), ghi nhận số byte tệp nghiệm thu. | **Số byte / % Hoàn thành** |
 | **F06** | `F06_NotificationBroadcaster.java` | Quản lý nhiều phiên Socket đồng thời. Tự động broadcast/push thông báo thời gian thực tới tất cả các client khi có trạng thái thay đổi. | **Nhiều Socket / Nhiều phiên** |
+| **F07** | `F07_SearchTickets.java` | Tìm kiếm theo từ khóa và lọc theo trạng thái, danh mục, mức ưu tiên. Server áp dụng điều kiện quyền truy cập và truy vấn SQL tham số hóa. | Từ khóa, bộ lọc / Danh sách yêu cầu phù hợp |
 | **F08** | `F08_UserManagement.java` | Server xác thực quyền Admin, kiểm tra dữ liệu và thực hiện Thêm, Sửa vai trò hoặc Khóa tài khoản người dùng trong MySQL. | Dữ liệu tài khoản / Trạng thái CSDL |
+| **F09** | `F09_TicketStatistics.java` | Thống kê số yêu cầu theo trạng thái và kỹ thuật viên bằng `COUNT` và `GROUP BY`; hỗ trợ lọc khoảng ngày và giới hạn theo quyền người dùng. | Vai trò, từ ngày, đến ngày / Bảng thống kê |
+| **F10** | `F10_TicketHistoryReview.java` | Tra cứu lịch sử theo mã yêu cầu; người gửi có thể chấm điểm 1-5 và nhận xét khi yêu cầu hoàn thành. | Mã yêu cầu, điểm, nhận xét / Timeline và kết quả lưu |
 
 ---
 
@@ -25,11 +28,11 @@ Dự án được xây dựng và chuẩn hóa theo đúng yêu cầu phân tác
   - Khởi chạy cả Server và Client cùng lúc (Rất tiện lợi cho giảng viên / chấm điểm).
   - Hoặc khởi chạy độc lập từng máy chủ (Server) hoặc máy trạm (Client).
 - **`ServerMain.java`**: Máy chủ TCP Server đa luồng (ThreadPool), có GUI Control Panel hiển thị danh sách các phiên Socket kết nối (F06) và Log sự kiện thời gian thực.
-- **`ClientMainGUI.java`**: Giao diện Client trực quan, hiện đại, tích hợp cấu hình IP:Port (F01), form tạo vé (F02), bảng danh sách & xuất file (F03), phân công & tải file (F04), cập nhật tiến độ slider (F05), luồng nền nhận thông báo (F06), màn hình quản trị người dùng (F08).
+- **`ClientMainGUI.java`**: Giao diện Client tích hợp F01-F10: tìm kiếm và bộ lọc Socket (F07), thống kê (F09), lịch sử và đánh giá (F10), cùng các màn hình F01-F06 và F08.
 - **`DatabaseManager.java`**: Quản lý kết nối MySQL (`workdesk_db`). Đặc biệt có cơ chế **tự động fallback sang Datastore tích hợp an toàn** nếu máy chấm thi chưa bật service MySQL, đảm bảo ứng dụng chạy 100% không bao giờ gặp lỗi thiếu DB.
 - **`FileTransferHelper.java`**: Module chia nhỏ luồng byte (chunking) và báo cáo tiến độ số byte / % truyền tải qua Socket.
 - **`Protocol.java`**: Định nghĩa giao thức gói tin mạng tuần tự hóa (`Protocol.Packet`).
-- **`schema.sql`**: Script tạo Database, bảng `users`, `tickets`, `ticket_history` và dữ liệu mẫu trong MySQL.
+- **`schema.sql`**: Script tạo Database, bảng `users`, `tickets`, `ticket_history`, `ticket_reviews` và dữ liệu mẫu trong MySQL.
 
 ---
 

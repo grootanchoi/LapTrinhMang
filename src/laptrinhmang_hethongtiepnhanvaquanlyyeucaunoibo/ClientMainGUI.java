@@ -5,6 +5,10 @@ import java.io.*;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.LineBorder;
@@ -33,6 +37,8 @@ public class ClientMainGUI {
     private String serverHost = "127.0.0.1";
     private int serverPort = 8888;
     private boolean isListening = false;
+    private final java.util.Map<String, BlockingQueue<Protocol.Packet>> responseQueues = new ConcurrentHashMap<>();
+    private final java.util.Map<String, Object> commandLocks = new ConcurrentHashMap<>();
 
     // Bảng dữ liệu và cache
     private DefaultTableModel ticketTableModel;
@@ -199,6 +205,14 @@ public class ClientMainGUI {
                                 // Hiển thị thông báo
                                 showToastNotification("THÔNG BÁO HỆ THỐNG (" + notif.timestamp + ")\n" + notif.message);
                             });
+                        } else if (Protocol.CMD_GET_TICKETS.equals(packet.command)) {
+                            if (Protocol.STATUS_SUCCESS.equals(packet.status) && packet.data instanceof List<?>) {
+                                @SuppressWarnings("unchecked") List<Models.Ticket> rows = (List<Models.Ticket>) packet.data;
+                                SwingUtilities.invokeLater(() -> displayTickets(rows));
+                            }
+                            responseQueues.computeIfAbsent(packet.command, k -> new LinkedBlockingQueue<>()).offer(packet);
+                        } else {
+                            responseQueues.computeIfAbsent(packet.command, k -> new LinkedBlockingQueue<>()).offer(packet);
                         }
                     }
                 }
@@ -266,7 +280,7 @@ public class ClientMainGUI {
         body.setBorder(new EmptyBorder(20, 25, 20, 25));
 
         // Action Toolbar
-        JPanel toolbar = new JPanel(new BorderLayout(10, 0));
+        JPanel toolbar = new JPanel(new GridLayout(2, 1, 0, 6));
         toolbar.setOpaque(false);
 
         JPanel leftActions = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
@@ -280,22 +294,32 @@ public class ClientMainGUI {
 
         JButton btnRefresh = createStyledButton("Làm mới danh sách", Color.WHITE, new Color(20, 35, 60), 13);
         btnRefresh.addActionListener(e -> requestTicketList());
+        JButton btnStats = createStyledButton("Thống kê (F09)", new Color(111, 66, 193), Color.WHITE, 12);
+        btnStats.addActionListener(e -> showStatisticsDialog());
 
         leftActions.add(btnNewTicket);
         leftActions.add(btnExportFile);
         leftActions.add(btnRefresh);
+        leftActions.add(btnStats);
 
         // Ô tìm kiếm nhanh
         JTextField txtSearch = new JTextField();
-        txtSearch.setPreferredSize(new Dimension(280, 34));
+        txtSearch.setPreferredSize(new Dimension(230, 34));
         txtSearch.setToolTipText("Tìm kiếm theo mã, tiêu đề, danh mục, trạng thái...");
         JPanel searchBox = new JPanel(new BorderLayout(5, 0));
         searchBox.setOpaque(false);
-        searchBox.add(new JLabel("Tìm kiếm:"), BorderLayout.WEST);
-        searchBox.add(txtSearch, BorderLayout.CENTER);
+        JComboBox<String> cbStatus = new JComboBox<>(new String[]{"Tất cả trạng thái", "Mới", "Đang xử lý", "Hoàn thành", "Đã hủy"});
+        JComboBox<String> cbCategory = new JComboBox<>(new String[]{"Tất cả danh mục", "IT - Phần cứng", "Mạng & Internet", "Phần mềm & Cấp quyền", "Nhân sự", "Hành chính", "Tài chính"});
+        JComboBox<String> cbPriority = new JComboBox<>(new String[]{"Tất cả ưu tiên", "Thấp", "Bình thường", "Cao", "Khẩn cấp"});
+        JButton btnSearch = createStyledButton("Tìm / Lọc (F07)", BLUE, Color.WHITE, 12);
+        JPanel filterControls = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0)); filterControls.setOpaque(false);
+        filterControls.add(new JLabel("Tìm kiếm:")); filterControls.add(txtSearch); filterControls.add(cbStatus); filterControls.add(cbCategory); filterControls.add(cbPriority); filterControls.add(btnSearch);
+        searchBox.add(filterControls, BorderLayout.CENTER);
+        btnSearch.addActionListener(e -> searchTickets(txtSearch.getText(), (String) cbStatus.getSelectedItem(), (String) cbCategory.getSelectedItem(), (String) cbPriority.getSelectedItem()));
+        txtSearch.addActionListener(e -> btnSearch.doClick());
 
-        toolbar.add(leftActions, BorderLayout.WEST);
-        toolbar.add(searchBox, BorderLayout.EAST);
+        toolbar.add(leftActions);
+        toolbar.add(searchBox);
         body.add(toolbar, BorderLayout.NORTH);
 
         // Bảng danh sách Ticket (F03)
@@ -403,27 +427,6 @@ public class ClientMainGUI {
         body.add(tableCard, BorderLayout.CENTER);
         root.add(body, BorderLayout.CENTER);
 
-        // Tìm kiếm tự động
-        txtSearch.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
-            public void insertUpdate(javax.swing.event.DocumentEvent e) { filterTable(); }
-            public void removeUpdate(javax.swing.event.DocumentEvent e) { filterTable(); }
-            public void changedUpdate(javax.swing.event.DocumentEvent e) { filterTable(); }
-            private void filterTable() {
-                String q = txtSearch.getText().trim().toLowerCase();
-                ticketTableModel.setRowCount(0);
-                for (Models.Ticket t : cachedTickets) {
-                    if (t.id.toLowerCase().contains(q) || t.title.toLowerCase().contains(q)
-                            || t.category.toLowerCase().contains(q) || t.status.toLowerCase().contains(q)
-                            || t.owner.toLowerCase().contains(q) || t.assignedTech.toLowerCase().contains(q)) {
-                        ticketTableModel.addRow(new Object[]{
-                                t.id, t.title, t.category, t.priority, t.owner, t.assignedTech,
-                                t.progress + "%", t.status, t.attachmentName
-                        });
-                    }
-                }
-            }
-        });
-
         mainFrame.setContentPane(root);
         mainFrame.setVisible(true);
 
@@ -439,15 +442,7 @@ public class ClientMainGUI {
             try {
                 F03_ViewTickets.ViewTicketsRequest req = new F03_ViewTickets.ViewTicketsRequest(currentUser.username, currentUser.role);
                 Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_GET_TICKETS, "", "", req);
-
-                synchronized (out) {
-                    out.writeObject(packet);
-                    out.flush();
-                }
-
-                // Chờ phản hồi trong luồng này (trừ khi luồng background F06 đã nhận)
-                // Lưu ý: Đối với mô hình Packet, ta có thể gửi và nhận đồng bộ hoặc qua handler.
-                // Để đơn giản và chính xác, Client sử dụng synchronized stream hoặc socket message.
+                sendAndReceiveSync(packet);
             } catch (Exception e) {
                 System.err.println("Lỗi gửi yêu cầu danh sách: " + e.getMessage());
             }
@@ -455,17 +450,75 @@ public class ClientMainGUI {
     }
 
     public synchronized Protocol.Packet sendAndReceiveSync(Protocol.Packet sendPacket) throws Exception {
-        synchronized (out) {
-            out.writeObject(sendPacket);
-            out.flush();
+        String command = sendPacket.command;
+        Object commandLock = commandLocks.computeIfAbsent(command, k -> new Object());
+        synchronized (commandLock) {
+            BlockingQueue<Protocol.Packet> queue = responseQueues.computeIfAbsent(command, k -> new LinkedBlockingQueue<>());
+            queue.clear();
+            synchronized (out) {
+                out.writeObject(sendPacket);
+                out.flush();
+            }
+            Protocol.Packet response = queue.poll(15, TimeUnit.SECONDS);
+            if (response == null) throw new IOException("Server không phản hồi lệnh " + command + " trong 15 giây.");
+            return response;
         }
-        // Nhận gói tin phản hồi tương ứng
-        // (Trong ứng dụng Swing Socket chuẩn, đồng bộ hóa qua khóa out/in)
-        Object respObj = in.readObject();
-        if (respObj instanceof Protocol.Packet resp) {
-            return resp;
+    }
+
+    private void searchTickets(String keyword, String statusLabel, String categoryLabel, String priorityLabel) {
+        String status = statusLabel.startsWith("Tất cả") ? "" : statusLabel;
+        String category = categoryLabel.startsWith("Tất cả") ? "" : categoryLabel;
+        String priority = priorityLabel.startsWith("Tất cả") ? "" : priorityLabel;
+        new Thread(() -> {
+            try {
+                Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(Protocol.CMD_SEARCH_TICKETS, "", "",
+                        new F07_SearchTickets.SearchRequest(keyword, status, category, priority)));
+                if (!Protocol.STATUS_SUCCESS.equals(response.status)) throw new IOException(response.message);
+                @SuppressWarnings("unchecked") List<Models.Ticket> rows = (List<Models.Ticket>) response.data;
+                SwingUtilities.invokeLater(() -> displayTickets(rows));
+            } catch (Exception ex) { SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(mainFrame, ex.getMessage(), "F07 - Tìm kiếm", JOptionPane.ERROR_MESSAGE)); }
+        }, "f07-search").start();
+    }
+
+    private void displayTickets(List<Models.Ticket> rows) {
+        cachedTickets = new ArrayList<>(rows);
+        if (ticketTableModel == null) return;
+        ticketTableModel.setRowCount(0);
+        for (Models.Ticket t : rows) ticketTableModel.addRow(new Object[]{t.id, t.title, t.category, t.priority,
+                t.owner, t.assignedTech, t.progress + "%", t.status, t.attachmentName});
+    }
+
+    private void showStatisticsDialog() {
+        JTextField dateFrom = new JTextField(10), dateTo = new JTextField(10);
+        JPanel range = new JPanel(new GridLayout(2, 2, 6, 6));
+        range.add(new JLabel("Từ ngày (YYYY-MM-DD, để trống = không giới hạn):")); range.add(dateFrom);
+        range.add(new JLabel("Đến ngày (YYYY-MM-DD, để trống = không giới hạn):")); range.add(dateTo);
+        if (JOptionPane.showConfirmDialog(mainFrame, range, "F09 - Chọn khoảng thời gian", JOptionPane.OK_CANCEL_OPTION) != JOptionPane.OK_OPTION) return;
+        String from = dateFrom.getText().trim(), to = dateTo.getText().trim();
+        try {
+            if (!from.isEmpty()) java.time.LocalDate.parse(from);
+            if (!to.isEmpty()) java.time.LocalDate.parse(to);
+            if (!from.isEmpty() && !to.isEmpty() && from.compareTo(to) > 0) throw new IllegalArgumentException("Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.");
+        } catch (RuntimeException ex) {
+            JOptionPane.showMessageDialog(mainFrame, "Ngày phải có định dạng YYYY-MM-DD và là ngày hợp lệ.", "F09 - Khoảng ngày không hợp lệ", JOptionPane.WARNING_MESSAGE);
+            return;
         }
-        return null;
+        new Thread(() -> {
+            try {
+                Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(Protocol.CMD_GET_STATISTICS, "", "",
+                        new F09_TicketStatistics.StatisticsRequest(from, to)));
+                if (!Protocol.STATUS_SUCCESS.equals(response.status)) throw new IOException(response.message);
+                F09_TicketStatistics.Statistics stats = (F09_TicketStatistics.Statistics) response.data;
+                SwingUtilities.invokeLater(() -> {
+                    String period = from.isEmpty() && to.isEmpty() ? "Toàn bộ thời gian" : (from.isEmpty() ? "Đến " + to : to.isEmpty() ? "Từ " + from : from + " đến " + to);
+                    StringBuilder text = new StringBuilder("Khoảng thời gian: ").append(period).append("\n\nTHỐNG KÊ THEO TRẠNG THÁI\n");
+                    for (Models.TicketStatistic s : stats.byStatus) text.append("• ").append(s.groupName).append(": ").append(s.count).append(" yêu cầu\n");
+                    text.append("\nTHỐNG KÊ THEO KỸ THUẬT VIÊN\n");
+                    for (Models.TicketStatistic s : stats.byTechnician) text.append("• ").append(s.groupName).append(": ").append(s.count).append(" yêu cầu\n");
+                    JOptionPane.showMessageDialog(mainFrame, text.toString(), "F09 - Thống kê yêu cầu", JOptionPane.INFORMATION_MESSAGE);
+                });
+            } catch (Exception ex) { SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(mainFrame, ex.getMessage(), "F09 - Thống kê", JOptionPane.ERROR_MESSAGE)); }
+        }, "f09-statistics").start();
     }
 
     // =========================================================================
@@ -566,7 +619,7 @@ public class ClientMainGUI {
         if (t == null) return;
 
         JDialog d = new JDialog(mainFrame, "Chi tiết yêu cầu: " + t.id, true);
-        d.setSize(480, 430);
+        d.setSize(520, 500);
         d.setLocationRelativeTo(mainFrame);
 
         JPanel p = new JPanel(new GridLayout(0, 1, 5, 5));
@@ -587,12 +640,65 @@ public class ClientMainGUI {
         p.add(new JLabel("Nội dung chi tiết:"));
         p.add(new JScrollPane(ta));
 
+        JButton btnHistory = createStyledButton("Lịch sử xử lý & đánh giá (F10)", new Color(111, 66, 193), Color.WHITE, 12);
+        btnHistory.addActionListener(e -> showHistoryReviewDialog(t));
+        p.add(btnHistory);
+
         JButton btnClose = createStyledButton("Đóng", new Color(108, 117, 125), Color.WHITE, 12);
         btnClose.addActionListener(e -> d.dispose());
         p.add(btnClose);
 
         d.setContentPane(p);
         d.setVisible(true);
+    }
+
+    private void showHistoryReviewDialog(Models.Ticket ticket) {
+        new Thread(() -> {
+            try {
+                Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(Protocol.CMD_GET_HISTORY, "", "", ticket.id));
+                if (!Protocol.STATUS_SUCCESS.equals(response.status)) throw new IOException(response.message);
+                Object[] payload = (Object[]) response.data;
+                @SuppressWarnings("unchecked") List<Models.TicketHistory> history = (List<Models.TicketHistory>) payload[0];
+                Models.TicketReview review = (Models.TicketReview) payload[1];
+                SwingUtilities.invokeLater(() -> {
+                    JDialog dialog = new JDialog(mainFrame, "F10 - Lịch sử và đánh giá " + ticket.id, true);
+                    dialog.setSize(610, 460); dialog.setLocationRelativeTo(mainFrame);
+                    JPanel root = new JPanel(new BorderLayout(8, 8)); root.setBorder(new EmptyBorder(14, 16, 14, 16));
+                    JTextArea timeline = new JTextArea(); timeline.setEditable(false); timeline.setLineWrap(true); timeline.setWrapStyleWord(true);
+                    StringBuilder text = new StringBuilder();
+                    for (Models.TicketHistory row : history) text.append(row.updatedAt).append(" | ").append(row.updatedBy).append("\n")
+                            .append(row.action).append(row.note == null || row.note.isEmpty() ? "" : "\nGhi chú: " + row.note).append("\n\n");
+                    if (history.isEmpty()) text.append("Chưa có lịch sử xử lý.");
+                    if (review != null) text.append("\nĐánh giá hiện tại: ").append(review.rating).append("/5 - ").append(review.comment == null ? "" : review.comment);
+                    timeline.setText(text.toString()); root.add(new JScrollPane(timeline), BorderLayout.CENTER);
+                    JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+                    boolean canRate = "requester".equalsIgnoreCase(currentUser.role) && currentUser.username.equalsIgnoreCase(ticket.owner) && "Hoàn thành".equalsIgnoreCase(ticket.status);
+                    if (canRate) {
+                        JComboBox<Integer> rating = new JComboBox<>(new Integer[]{5, 4, 3, 2, 1});
+                        JTextField comment = new JTextField(23); comment.setToolTipText("Nhận xét về kết quả hỗ trợ");
+                        JButton save = createStyledButton("Lưu đánh giá", BLUE, Color.WHITE, 12);
+                        save.addActionListener(e -> saveTicketReview(ticket.id, (Integer) rating.getSelectedItem(), comment.getText(), dialog));
+                        footer.add(new JLabel("Điểm: ")); footer.add(rating); footer.add(comment); footer.add(save);
+                    }
+                    JButton close = createStyledButton("Đóng", new Color(108,117,125), Color.WHITE, 12); close.addActionListener(e -> dialog.dispose()); footer.add(close);
+                    root.add(footer, BorderLayout.SOUTH); dialog.setContentPane(root); dialog.setVisible(true);
+                });
+            } catch (Exception ex) { SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(mainFrame, ex.getMessage(), "F10 - Lịch sử", JOptionPane.ERROR_MESSAGE)); }
+        }, "f10-history").start();
+    }
+
+    private void saveTicketReview(String ticketId, int rating, String comment, JDialog dialog) {
+        new Thread(() -> {
+            try {
+                Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(Protocol.CMD_RATE_TICKET, "", "",
+                        new F10_TicketHistoryReview.ReviewRequest(ticketId, rating, comment)));
+                SwingUtilities.invokeLater(() -> {
+                    JOptionPane.showMessageDialog(dialog, response.message, "F10 - Đánh giá",
+                            Protocol.STATUS_SUCCESS.equals(response.status) ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.ERROR_MESSAGE);
+                    if (Protocol.STATUS_SUCCESS.equals(response.status)) dialog.dispose();
+                });
+            } catch (Exception ex) { SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(dialog, ex.getMessage())); }
+        }, "f10-review").start();
     }
 
     private void exportTicketListToFile() {
@@ -837,14 +943,27 @@ public class ClientMainGUI {
         JTable userTable = new JTable(userModel);
         userTable.setRowHeight(30);
 
-        Runnable loadUsers = () -> {
-            userModel.setRowCount(0);
-            DatabaseManager db = DatabaseManager.getInstance();
-            List<Models.User> list = db.getAllUsers();
-            for (Models.User u : list) {
-                userModel.addRow(new Object[]{u.username, u.displayName, u.role, u.status});
+        Runnable loadUsers = () -> new Thread(() -> {
+            try {
+                Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(
+                        Protocol.CMD_GET_USERS, "", "",
+                        new F08_UserManagement.AdminUserRequest(currentUser.username, currentUser.role)));
+                if (!Protocol.STATUS_SUCCESS.equals(response.status)) {
+                    throw new IOException(response.message);
+                }
+                @SuppressWarnings("unchecked") List<Models.User> list = (List<Models.User>) response.data;
+                SwingUtilities.invokeLater(() -> {
+                    userModel.setRowCount(0);
+                    for (Models.User user : list) {
+                        userModel.addRow(new Object[]{user.username, user.displayName, user.role, user.status});
+                    }
+                });
+            } catch (Exception ex) {
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(d,
+                        "Không thể tải danh sách tài khoản từ Server: " + ex.getMessage(),
+                        "Quản lý tài khoản", JOptionPane.ERROR_MESSAGE));
             }
-        };
+        }, "f08-load-users").start();
         loadUsers.run();
 
         root.add(new JScrollPane(userTable), BorderLayout.CENTER);
@@ -876,14 +995,24 @@ public class ClientMainGUI {
                     return;
                 }
                 Models.User newUser = new Models.User(u.getText().trim(), new String(p.getPassword()), name.getText().trim(), (String) r.getSelectedItem(), "Đang hoạt động");
-                try {
-                    Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_ADD_USER, "", "", newUser);
-                    synchronized (out) { out.writeObject(packet); out.flush(); }
-                    JOptionPane.showMessageDialog(d, "Đã thêm tài khoản thành công!");
-                    loadUsers.run();
-                } catch (Exception ex) {
-                    JOptionPane.showMessageDialog(d, "Lỗi thêm tài khoản: " + ex.getMessage());
-                }
+                new Thread(() -> {
+                    try {
+                        Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(
+                                Protocol.CMD_ADD_USER, "", "", newUser));
+                        if (!Protocol.STATUS_SUCCESS.equals(response.status)) {
+                            throw new IOException(response.message);
+                        }
+                        SwingUtilities.invokeLater(() -> {
+                            JOptionPane.showMessageDialog(d, response.message,
+                                    "Quản lý tài khoản", JOptionPane.INFORMATION_MESSAGE);
+                            loadUsers.run();
+                        });
+                    } catch (Exception ex) {
+                        SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(d,
+                                "Không thể thêm tài khoản: " + ex.getMessage(),
+                                "Quản lý tài khoản", JOptionPane.ERROR_MESSAGE));
+                    }
+                }, "f08-add-user").start();
             }
         });
 
@@ -947,16 +1076,7 @@ public class ClientMainGUI {
     }
 
     private void refreshTicketsDirectly() {
-        DatabaseManager db = DatabaseManager.getInstance();
-        List<Models.Ticket> list = db.getTicketsForUser(currentUser.username, currentUser.role);
-        cachedTickets = list;
-        ticketTableModel.setRowCount(0);
-        for (Models.Ticket t : list) {
-            ticketTableModel.addRow(new Object[]{
-                    t.id, t.title, t.category, t.priority, t.owner, t.assignedTech,
-                    t.progress + "%", t.status, t.attachmentName
-            });
-        }
+        requestTicketList();
     }
 
     private void logout() {

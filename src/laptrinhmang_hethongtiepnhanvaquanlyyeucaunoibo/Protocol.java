@@ -17,6 +17,11 @@ public class Protocol {
     public static final String CMD_GET_TICKETS = "CMD_GET_TICKETS";
     public static final String CMD_GET_TICKET_DETAIL = "CMD_GET_TICKET_DETAIL";
     public static final String CMD_EXPORT_TICKETS = "CMD_EXPORT_TICKETS";
+    // F07 search/filter, F09 statistics, F10 history and rating
+    public static final String CMD_SEARCH_TICKETS = "CMD_SEARCH_TICKETS";
+    public static final String CMD_GET_STATISTICS = "CMD_GET_STATISTICS";
+    public static final String CMD_GET_HISTORY = "CMD_GET_HISTORY";
+    public static final String CMD_RATE_TICKET = "CMD_RATE_TICKET";
 
     // F04 - Tiếp nhận & Phân công kỹ thuật viên, Tải file đính kèm
     public static final String CMD_ASSIGN_TECH = "CMD_ASSIGN_TECH";
