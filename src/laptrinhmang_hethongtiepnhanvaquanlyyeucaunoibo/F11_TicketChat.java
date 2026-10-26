@@ -31,9 +31,16 @@ public class F11_TicketChat {
             return Protocol.Packet.error(Protocol.CMD_GET_TICKET_CHAT, "Bạn không có quyền tham gia trao đổi của yêu cầu này.");
         }
 
+        DatabaseManager.getInstance().markTicketChatRead(ticket.id, user.username);
         List<Models.TicketChatMessage> messages =
-                DatabaseManager.getInstance().getTicketChatMessages(ticket.id);
+                DatabaseManager.getInstance().getTicketChatMessages(ticket.id, user.username);
         return Protocol.Packet.success(Protocol.CMD_GET_TICKET_CHAT, "Đã tải lịch sử trao đổi.", messages);
+    }
+
+    public static Protocol.Packet getUnreadCounts(Models.User user) {
+        if (user == null) return Protocol.Packet.error(Protocol.CMD_GET_UNREAD_CHAT_COUNTS, "Bạn cần đăng nhập.");
+        return Protocol.Packet.success(Protocol.CMD_GET_UNREAD_CHAT_COUNTS, "Đã tải số tin chưa đọc.",
+                DatabaseManager.getInstance().getUnreadTicketChatCounts(user.username, user.role));
     }
 
     public static Protocol.Packet sendMessage(Protocol.Packet packet, Models.User user,

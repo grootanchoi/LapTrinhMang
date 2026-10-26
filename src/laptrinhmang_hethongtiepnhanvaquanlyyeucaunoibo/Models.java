@@ -114,12 +114,16 @@ public class Models {
     public static class TicketChatMessage implements Serializable {
         private static final long serialVersionUID = 1L;
         public String ticketId, sender, content, sentAt;
+        public long id;
+        public boolean read;
 
-        public TicketChatMessage(String ticketId, String sender, String content, String sentAt) {
+        public TicketChatMessage(long id, String ticketId, String sender, String content, String sentAt, boolean read) {
+            this.id = id;
             this.ticketId = ticketId;
             this.sender = sender;
             this.content = content;
             this.sentAt = sentAt;
+            this.read = read;
         }
     }
 }

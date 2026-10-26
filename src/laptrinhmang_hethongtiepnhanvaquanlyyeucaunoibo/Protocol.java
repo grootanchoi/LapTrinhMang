@@ -24,6 +24,7 @@ public class Protocol {
     public static final String CMD_RATE_TICKET = "CMD_RATE_TICKET";
     public static final String CMD_GET_TICKET_CHAT = "CMD_GET_TICKET_CHAT";
     public static final String CMD_SEND_TICKET_CHAT = "CMD_SEND_TICKET_CHAT";
+    public static final String CMD_GET_UNREAD_CHAT_COUNTS = "CMD_GET_UNREAD_CHAT_COUNTS";
 
     // F04 - Tiếp nhận & Phân công kỹ thuật viên, Tải file đính kèm
     public static final String CMD_ASSIGN_TECH = "CMD_ASSIGN_TECH";

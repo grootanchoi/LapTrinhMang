@@ -67,23 +67,33 @@ CREATE TABLE IF NOT EXISTS `ticket_messages` (
     CONSTRAINT `fk_message_sender` FOREIGN KEY (`sender`) REFERENCES `users`(`username`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `ticket_message_reads` (
+    `message_id` BIGINT NOT NULL,
+    `username` VARCHAR(50) NOT NULL,
+    `read_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`message_id`, `username`),
+    CONSTRAINT `fk_message_read_message` FOREIGN KEY (`message_id`) REFERENCES `ticket_messages`(`id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_message_read_user` FOREIGN KEY (`username`) REFERENCES `users`(`username`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Chuẩn hóa dữ liệu cũ khi chạy lại script; tránh cột cũ còn charset khác.
 ALTER TABLE `users` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ALTER TABLE `tickets` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ALTER TABLE `ticket_history` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ALTER TABLE `ticket_reviews` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ALTER TABLE `ticket_messages` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+ALTER TABLE `ticket_message_reads` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- Thêm tài khoản mẫu ban đầu:
 -- Admin: admin / admin123
 -- Kỹ thuật viên: tech01 / tech123
 -- Nhân viên gửi yêu cầu: user01 / user123
 INSERT INTO `users` (`username`, `password`, `display_name`, `role`, `status`) VALUES
-('admin', 'admin123', 'Quản trị viên hệ thống', 'admin', 'Đang hoạt động'),
-('tech01', 'tech123', 'Nguyễn Văn Kỹ Thuật', 'tech', 'Đang hoạt động'),
-('tech02', 'tech123', 'Trần Thị Support', 'tech', 'Đang hoạt động'),
-('user01', 'user123', 'Lê Văn Nhân Viên', 'requester', 'Đang hoạt động'),
-('user02', 'user123', 'Phạm Thị Kế Toán', 'requester', 'Đang hoạt động')
+('admin', 'pbkdf2-sha256$210000$m2KYdwsTBM6HFKa1W1yElA==$byvQpPO3pdnY6PUxKOu53c+TSwblMzDuoOqWxZ9dYhQ=', 'Quản trị viên hệ thống', 'admin', 'Đang hoạt động'),
+('tech01', 'pbkdf2-sha256$210000$GlwOt/KdCJLkUneSpZs7Og==$MPOWCFJ8N/nLX0Noy9GYidJe2y9U3Mvzq/88NIUFRsA=', 'Nguyễn Văn Kỹ Thuật', 'tech', 'Đang hoạt động'),
+('tech02', 'pbkdf2-sha256$210000$4+Kii0ijBcujDLJQMIcdUA==$XcEOUZ81KlTmcvydcNmxMzlENOZeB6Gwr70SctpfzOQ=', 'Trần Thị Support', 'tech', 'Đang hoạt động'),
+('user01', 'pbkdf2-sha256$210000$iQNK/YFlc4sFI+ZxxlHfxQ==$U6Nu8fSigLxjJ7p3nkeLQqScf6oZ7Z12n7xyM2rkg5Q=', 'Lê Văn Nhân Viên', 'requester', 'Đang hoạt động'),
+('user02', 'pbkdf2-sha256$210000$0767svk+/9KMBNwZWSBAVA==$5Miuqkc5IOV1LL1Z5v3kOG35wpnQodqtIqiLWZs5dSA=', 'Phạm Thị Kế Toán', 'requester', 'Đang hoạt động')
 ON DUPLICATE KEY UPDATE `username`=`username`;
 
 -- Thêm các yêu cầu mẫu ban đầu

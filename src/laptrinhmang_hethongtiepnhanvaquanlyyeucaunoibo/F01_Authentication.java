@@ -1,7 +1,6 @@
 package laptrinhmang_hethongtiepnhanvaquanlyyeucaunoibo;
 
 import java.io.*;
-import java.net.InetSocketAddress;
 import java.net.Socket;
 
 /**
@@ -93,9 +92,7 @@ public class F01_Authentication {
     public static ConnectionResult performLogin(String host, int port, String username, String password) {
         ConnectionResult res = new ConnectionResult();
         try {
-            Socket socket = new Socket();
-            // Thiết lập timeout kết nối 5000ms
-            socket.connect(new InetSocketAddress(host, port), 5000);
+            Socket socket = NetworkSecurityConfig.createClientSocket(host, port, 5000);
 
             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
             out.flush();

@@ -33,6 +33,9 @@ public class ServerMain {
     private JTextArea logArea;
     private JLabel statusLabel;
     private JLabel clientsCountLabel;
+    private JLabel roleCountsLabel;
+    private JLabel commandMetricsLabel;
+    private final ServerMetrics metrics = new ServerMetrics();
     private DefaultTableModel clientTableModel;
 
     public static void main(String[] args) {
@@ -116,12 +119,22 @@ public class ServerMain {
         root.add(split, BorderLayout.CENTER);
 
         // Thanh công cụ phía dưới
-        JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 5));
+        JPanel bottomPanel = new JPanel(new BorderLayout(10, 5));
+        JPanel metricsPanel = new JPanel(new GridLayout(2, 1, 2, 2));
+        metricsPanel.setBorder(BorderFactory.createTitledBorder("Dashboard TCP"));
+        roleCountsLabel = new JLabel("Client theo vai trò: Admin 0 | KTV 0 | Người gửi 0 | Khách 0");
+        commandMetricsLabel = new JLabel("Lệnh: 0 | Lỗi: 0 | Phản hồi TB: 0.00 ms | Tối đa: 0.00 ms");
+        metricsPanel.add(roleCountsLabel);
+        metricsPanel.add(commandMetricsLabel);
+        bottomPanel.add(metricsPanel, BorderLayout.CENTER);
+        JPanel bottomActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 5));
         JButton btnClearLog = ClientMainGUI.createStyledButton("Xóa nhật ký", new Color(220, 53, 69), Color.WHITE, 12);
         btnClearLog.addActionListener(e -> logArea.setText(""));
-        bottomPanel.add(btnClearLog);
+        bottomActions.add(btnClearLog);
+        bottomPanel.add(bottomActions, BorderLayout.EAST);
         root.add(bottomPanel, BorderLayout.SOUTH);
 
+        new Timer(1000, e -> refreshMetricsUI()).start();
         serverFrame.setContentPane(root);
         serverFrame.setVisible(true);
     }
@@ -129,11 +142,14 @@ public class ServerMain {
     public synchronized void startServer(int port) {
         if (isRunning) return;
         try {
-            serverSocket = new ServerSocket(port);
+            serverSocket = NetworkSecurityConfig.createServerSocket(port);
             isRunning = true;
             threadPool = Executors.newCachedThreadPool();
 
             log("Máy chủ TCP đã khởi động thành công trên cổng: " + port);
+            log(NetworkSecurityConfig.isTlsEnabled()
+                    ? "Bảo mật kết nối: TLS đã bật."
+                    : "CẢNH BÁO: TLS đang tắt; lưu lượng mạng chưa được mã hóa.");
             log("Chế độ lưu trữ: " + (DatabaseManager.getInstance().isUsingMySQL() ? "MySQL Server (workdesk_db)" : "Local Datastore (Bộ nhớ tích hợp an toàn)"));
             log("Sẵn sàng lắng nghe kết nối từ các Client (F01-F11)...");
 
@@ -177,6 +193,14 @@ public class ServerMain {
         }
     }
 
+    public int getActiveSessionCount() {
+        return broadcaster.getActiveSessionCount();
+    }
+
+    public ServerMetrics getMetrics() {
+        return metrics;
+    }
+
     public void log(String message) {
         String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
         String entry = "[" + time + "] " + message;
@@ -191,7 +215,28 @@ public class ServerMain {
 
     private void updateSessionUI() {
         if (clientsCountLabel != null) {
-            SwingUtilities.invokeLater(() -> clientsCountLabel.setText("Số phiên Socket: " + broadcaster.getActiveSessionCount()));
+            SwingUtilities.invokeLater(this::refreshMetricsUI);
+        }
+    }
+
+    private void refreshMetricsUI() {
+        java.util.Map<String, Integer> roles = broadcaster.getSessionCountsByRole();
+        int admins = roles.getOrDefault("admin", 0);
+        int technicians = roles.getOrDefault("tech", 0);
+        int requesters = roles.getOrDefault("requester", 0);
+        int guests = roles.getOrDefault("none", 0);
+        if (clientsCountLabel != null) {
+            clientsCountLabel.setText("Số phiên Socket: " + broadcaster.getActiveSessionCount());
+        }
+        if (roleCountsLabel != null) {
+            roleCountsLabel.setText("Client theo vai trò: Admin " + admins + " | KTV " + technicians
+                    + " | Người gửi " + requesters + " | Khách " + guests);
+        }
+        if (commandMetricsLabel != null) {
+            commandMetricsLabel.setText(String.format(java.util.Locale.ROOT,
+                    "Lệnh: %d | Lỗi: %d | Phản hồi TB: %.2f ms | Tối đa: %.2f ms",
+                    metrics.getProcessedCommands(), metrics.getErrors(),
+                    metrics.getAverageResponseMillis(), metrics.getMaxResponseMillis()));
         }
     }
 
@@ -243,10 +288,17 @@ public class ServerMain {
                 // Vòng lặp nhận và điều phối gói tin (Protocol Dispatcher)
                 while (connected && !socket.isClosed()) {
                     Object packetObj = in.readObject();
-                    if (!(packetObj instanceof Protocol.Packet packet)) continue;
+                    if (!(packetObj instanceof Protocol.Packet packet)) {
+                        metrics.recordError();
+                        continue;
+                    }
 
                     log("[Nhận Packet] Từ " + getUsername() + " [" + sessionId + "] -> Lệnh: " + packet.command);
+                    long startedAt = System.nanoTime();
                     Protocol.Packet responsePacket = dispatchCommand(packet);
+                    metrics.recordCommand(System.nanoTime() - startedAt,
+                            responsePacket == null || Protocol.STATUS_ERROR.equals(responsePacket.status));
+                    SwingUtilities.invokeLater(ServerMain.this::refreshMetricsUI);
 
                     if (responsePacket != null) {
                         synchronized (out) {
@@ -259,6 +311,8 @@ public class ServerMain {
             } catch (EOFException | SocketException e) {
                 // Client ngắt kết nối bình thường
             } catch (Exception e) {
+                metrics.recordError();
+                SwingUtilities.invokeLater(ServerMain.this::refreshMetricsUI);
                 log("[Lỗi phiên " + sessionId + "] " + e.getMessage());
             } finally {
                 cleanup();
@@ -290,6 +344,7 @@ public class ServerMain {
                         this.authenticatedUser = lr.user;
                         log("[F01] Đăng nhập thành công: " + authenticatedUser.username + " (" + authenticatedUser.role + ")");
                         refreshTableSession(true);
+                        updateSessionUI();
                     }
                     return resp;
                 }
@@ -330,6 +385,10 @@ public class ServerMain {
 
                 case Protocol.CMD_GET_TICKET_CHAT: {
                     return F11_TicketChat.getMessages(packet, authenticatedUser);
+                }
+
+                case Protocol.CMD_GET_UNREAD_CHAT_COUNTS: {
+                    return F11_TicketChat.getUnreadCounts(authenticatedUser);
                 }
 
                 case Protocol.CMD_SEND_TICKET_CHAT: {

@@ -42,6 +42,7 @@ public class ClientMainGUI {
     private final java.util.Map<String, JTextArea> openTicketChats = new ConcurrentHashMap<>();
     private final java.util.Map<String, List<String>> pendingTicketChatMessages = new ConcurrentHashMap<>();
     private final java.util.Set<String> loadingTicketChats = ConcurrentHashMap.newKeySet();
+    private final java.util.Map<String, Integer> unreadChatCounts = new ConcurrentHashMap<>();
 
     // Bảng dữ liệu và cache
     private DefaultTableModel ticketTableModel;
@@ -204,6 +205,11 @@ public class ClientMainGUI {
                             SwingUtilities.invokeLater(() -> {
                                 if ("TICKET_CHAT_MESSAGE".equals(notif.eventType)) {
                                     appendTicketChatMessage(notif.ticketId, notif.message);
+                                    if (openTicketChats.containsKey(notif.ticketId)) {
+                                        markChatRead(notif.ticketId);
+                                    } else {
+                                        refreshChatUnreadCounts();
+                                    }
                                 }
                                 // Tự động làm mới danh sách yêu cầu (F03)
                                 requestTicketList();
@@ -414,6 +420,7 @@ public class ClientMainGUI {
         });
 
         JButton btnChat = createStyledButton("Trao đổi trực tuyến (F11)", new Color(111, 66, 193), Color.WHITE, 12);
+        chatActionButton = btnChat;
         btnChat.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) {
@@ -457,6 +464,7 @@ public class ClientMainGUI {
 
         // Lấy danh sách lần đầu
         requestTicketList();
+        refreshChatUnreadCounts();
     }
 
     // =========================================================================
@@ -807,7 +815,9 @@ public class ClientMainGUI {
                 for (Object row : rows) {
                     if (row instanceof Models.TicketChatMessage chatMessage) {
                         String line = chatMessage.sentAt + " | " + chatMessage.sender
-                                + ": " + chatMessage.content;
+                                + ": " + chatMessage.content
+                                + (chatMessage.sender.equalsIgnoreCase(currentUser.username)
+                                        ? (chatMessage.read ? " [Đã đọc]" : " [Đã gửi]") : "");
                         history.append(line).append('\n');
                         loadedMessages.add(line);
                     }
@@ -824,6 +834,7 @@ public class ClientMainGUI {
                     }
                     transcript.setCaretPosition(transcript.getDocument().getLength());
                 });
+                refreshChatUnreadCounts();
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
                     loadingTicketChats.remove(ticket.id);
@@ -843,6 +854,53 @@ public class ClientMainGUI {
         if (transcript == null) return;
         transcript.append(message + "\n");
         transcript.setCaretPosition(transcript.getDocument().getLength());
+    }
+
+    private JButton chatActionButton;
+
+    private void refreshChatUnreadCounts() {
+        if (currentUser == null || clientSocket == null || clientSocket.isClosed()) return;
+        new Thread(() -> {
+            try {
+                Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(
+                        Protocol.CMD_GET_UNREAD_CHAT_COUNTS, "", "", null));
+                if (!Protocol.STATUS_SUCCESS.equals(response.status)) throw new IOException(response.message);
+                if (!(response.data instanceof java.util.Map<?, ?> counts)) {
+                    throw new IOException("Dữ liệu số tin chưa đọc từ Server không hợp lệ.");
+                }
+                unreadChatCounts.clear();
+                for (java.util.Map.Entry<?, ?> entry : counts.entrySet()) {
+                    if (entry.getKey() instanceof String ticketId && entry.getValue() instanceof Integer count) {
+                        unreadChatCounts.put(ticketId, count);
+                    }
+                }
+                SwingUtilities.invokeLater(this::updateChatUnreadLabel);
+            } catch (Exception ex) {
+                System.err.println("[F11] Không thể tải số tin chưa đọc: " + ex.getMessage());
+            }
+        }, "f11-unread-counts").start();
+    }
+
+    private void markChatRead(String ticketId) {
+        new Thread(() -> {
+            try {
+                Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(
+                        Protocol.CMD_GET_TICKET_CHAT, "", "",
+                        new F11_TicketChat.ChatRequest(ticketId, "")));
+                if (!Protocol.STATUS_SUCCESS.equals(response.status)) throw new IOException(response.message);
+                refreshChatUnreadCounts();
+            } catch (Exception ex) {
+                System.err.println("[F11] Không thể đồng bộ trạng thái đã đọc: " + ex.getMessage());
+            }
+        }, "f11-mark-read").start();
+    }
+
+    private void updateChatUnreadLabel() {
+        if (chatActionButton == null) return;
+        int total = unreadChatCounts.values().stream().mapToInt(Integer::intValue).sum();
+        chatActionButton.setText(total == 0
+                ? "Trao đổi trực tuyến (F11)"
+                : "Trao đổi trực tuyến (F11) · Chưa đọc: " + total);
     }
 
     private void exportTicketListToFile() {

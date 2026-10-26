@@ -47,6 +47,17 @@ public class F06_NotificationBroadcaster {
         return activeSessions.size();
     }
 
+    public java.util.Map<String, Integer> getSessionCountsByRole() {
+        java.util.Map<String, Integer> counts = new java.util.HashMap<>();
+        for (ClientSessionHolder session : activeSessions) {
+            if (session.isConnected()) {
+                String role = session.getRole();
+                counts.merge(role == null ? "none" : role.toLowerCase(), 1, Integer::sum);
+            }
+        }
+        return counts;
+    }
+
     /**
      * Phát sóng thông báo tới TẤT CẢ các Socket kết nối trong hệ thống (Broadcast)
      */

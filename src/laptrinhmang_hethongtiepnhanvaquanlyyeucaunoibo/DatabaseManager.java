@@ -30,7 +30,7 @@ public class DatabaseManager {
 
     private DatabaseManager() {
         initLocalSampleData();
-        tryConnectMySQL();
+        if (!Boolean.getBoolean("workdesk.testMode")) tryConnectMySQL();
     }
 
     public static synchronized DatabaseManager getInstance() {
@@ -42,11 +42,11 @@ public class DatabaseManager {
 
     private void initLocalSampleData() {
         // Tài khoản mẫu
-        localUsers.put("admin", new Models.User("admin", "admin123", "Quản trị viên hệ thống", "admin", "Đang hoạt động"));
-        localUsers.put("tech01", new Models.User("tech01", "tech123", "Nguyễn Văn Kỹ Thuật", "tech", "Đang hoạt động"));
-        localUsers.put("tech02", new Models.User("tech02", "tech123", "Trần Thị Support", "tech", "Đang hoạt động"));
-        localUsers.put("user01", new Models.User("user01", "user123", "Lê Văn Nhân Viên", "requester", "Đang hoạt động"));
-        localUsers.put("user02", new Models.User("user02", "user123", "Phạm Thị Kế Toán", "requester", "Đang hoạt động"));
+        localUsers.put("admin", new Models.User("admin", PasswordHasher.hash("admin123"), "Quản trị viên hệ thống", "admin", "Đang hoạt động"));
+        localUsers.put("tech01", new Models.User("tech01", PasswordHasher.hash("tech123"), "Nguyễn Văn Kỹ Thuật", "tech", "Đang hoạt động"));
+        localUsers.put("tech02", new Models.User("tech02", PasswordHasher.hash("tech123"), "Trần Thị Support", "tech", "Đang hoạt động"));
+        localUsers.put("user01", new Models.User("user01", PasswordHasher.hash("user123"), "Lê Văn Nhân Viên", "requester", "Đang hoạt động"));
+        localUsers.put("user02", new Models.User("user02", PasswordHasher.hash("user123"), "Phạm Thị Kế Toán", "requester", "Đang hoạt động"));
 
         // Yêu cầu mẫu
         Models.Ticket t1 = new Models.Ticket("YC-2026-0001", "Máy in phòng Kế toán không nhận lệnh in", "Hành chính", "Cao",
@@ -98,6 +98,13 @@ public class DatabaseManager {
                 + "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
         try (Statement st = conn.createStatement()) {
             st.executeUpdate(sql);
+            st.executeUpdate("CREATE TABLE IF NOT EXISTS ticket_message_reads ("
+                    + "message_id BIGINT NOT NULL, username VARCHAR(50) NOT NULL, "
+                    + "read_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                    + "PRIMARY KEY (message_id, username), "
+                    + "FOREIGN KEY (message_id) REFERENCES ticket_messages(id) ON DELETE CASCADE, "
+                    + "FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE) "
+                    + "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
         }
     }
 
@@ -112,12 +119,16 @@ public class DatabaseManager {
     // ==================== F01: ĐĂNG NHẬP & XÁC THỰC ====================
     public Models.User authenticate(String username, String password) {
         if (useMySQL) {
-            String sql = "SELECT * FROM users WHERE username = ? AND password = ?";
+            String sql = "SELECT username, password, display_name, role, status FROM users WHERE username = ?";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, username);
-                ps.setString(2, password);
                 try (ResultSet rs = ps.executeQuery()) {
                     if (rs.next()) {
+                        String storedPassword = rs.getString("password");
+                        if (!PasswordHasher.verify(password, storedPassword)) return null;
+                        if (!PasswordHasher.isEncoded(storedPassword)) {
+                            migrateLegacyPassword(username, password);
+                        }
                         return new Models.User(
                                 rs.getString("username"),
                                 rs.getString("password"),
@@ -132,12 +143,26 @@ public class DatabaseManager {
             }
         }
 
-        // Fallback
         Models.User u = localUsers.get(username);
-        if (u != null && u.password.equals(password)) {
+        if (u != null && PasswordHasher.verify(password, u.password)) {
+            if (!PasswordHasher.isEncoded(u.password)) {
+                u.password = PasswordHasher.hash(password);
+            }
             return u;
         }
         return null;
+    }
+
+    private void migrateLegacyPassword(String username, String legacyPassword) {
+        String sql = "UPDATE users SET password = ? WHERE username = ? AND password = ?";
+        try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, PasswordHasher.hash(legacyPassword));
+            ps.setString(2, username);
+            ps.setString(3, legacyPassword);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            System.err.println("[DatabaseManager] Không thể nâng cấp mật khẩu cũ: " + e.getMessage());
+        }
     }
 
     public Models.User getUserByUsername(String username) {
@@ -406,18 +431,25 @@ public class DatabaseManager {
         return localTickets.get(id);
     }
 
-    public synchronized List<Models.TicketChatMessage> getTicketChatMessages(String ticketId) {
+    public synchronized List<Models.TicketChatMessage> getTicketChatMessages(String ticketId, String username) {
         List<Models.TicketChatMessage> messages = new ArrayList<>();
         if (useMySQL) {
-            String sql = "SELECT ticket_id, sender, content, "
-                    + "DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at "
-                    + "FROM ticket_messages WHERE ticket_id = ? ORDER BY id ASC";
+            String sql = "SELECT m.id, m.ticket_id, m.sender, m.content, "
+                    + "DATE_FORMAT(m.sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at, "
+                    + "CASE WHEN m.sender = ? THEN EXISTS (SELECT 1 FROM ticket_message_reads r "
+                    + "WHERE r.message_id = m.id AND r.username <> m.sender) "
+                    + "ELSE EXISTS (SELECT 1 FROM ticket_message_reads r "
+                    + "WHERE r.message_id = m.id AND r.username = ?) END AS is_read "
+                    + "FROM ticket_messages m WHERE m.ticket_id = ? ORDER BY m.id ASC";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, ticketId);
+                ps.setString(1, username);
+                ps.setString(2, username);
+                ps.setString(3, ticketId);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
-                        messages.add(new Models.TicketChatMessage(rs.getString("ticket_id"),
-                                rs.getString("sender"), rs.getString("content"), rs.getString("sent_at")));
+                        messages.add(new Models.TicketChatMessage(rs.getLong("id"), rs.getString("ticket_id"),
+                                rs.getString("sender"), rs.getString("content"), rs.getString("sent_at"),
+                                rs.getBoolean("is_read")));
                     }
                 }
             } catch (SQLException e) {
@@ -427,7 +459,16 @@ public class DatabaseManager {
             return messages;
         }
         List<Models.TicketChatMessage> localMessages = localTicketChat.get(ticketId);
-        if (localMessages != null) messages.addAll(localMessages);
+        if (localMessages != null) {
+            for (Models.TicketChatMessage message : localMessages) {
+                boolean isRead = message.sender.equalsIgnoreCase(username)
+                        ? localTicketChatReads.getOrDefault(message.id, java.util.Set.of()).stream()
+                                .anyMatch(reader -> !reader.equalsIgnoreCase(username))
+                        : localTicketChatReads.getOrDefault(message.id, java.util.Set.of()).contains(username);
+                messages.add(new Models.TicketChatMessage(message.id, message.ticketId, message.sender,
+                        message.content, message.sentAt, isRead));
+            }
+        }
         return messages;
     }
 
@@ -435,13 +476,29 @@ public class DatabaseManager {
         String sentAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
         if (useMySQL) {
             String sql = "INSERT INTO ticket_messages (ticket_id, sender, content) VALUES (?, ?, ?)";
-            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (Connection conn = getConnection();
+                    PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
                 ps.setString(1, ticketId);
                 ps.setString(2, sender);
                 ps.setString(3, content);
                 if (ps.executeUpdate() > 0) {
-                    List<Models.TicketChatMessage> messages = getTicketChatMessages(ticketId);
-                    if (!messages.isEmpty()) return messages.get(messages.size() - 1);
+                    long messageId;
+                    try (ResultSet keys = ps.getGeneratedKeys()) {
+                        if (!keys.next()) {
+                            System.err.println("[F11] Không nhận được mã tin nhắn vừa lưu.");
+                            return null;
+                        }
+                        messageId = keys.getLong(1);
+                    }
+                    String select = "SELECT DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at "
+                            + "FROM ticket_messages WHERE id = ?";
+                    try (PreparedStatement last = conn.prepareStatement(select)) {
+                        last.setLong(1, messageId);
+                        try (ResultSet rs = last.executeQuery()) {
+                            if (rs.next()) return new Models.TicketChatMessage(messageId, ticketId,
+                                    sender, content, rs.getString("sent_at"), false);
+                        }
+                    }
                 }
             } catch (SQLException e) {
                 System.err.println("[F11] Lỗi lưu tin nhắn trao đổi: " + e.getMessage());
@@ -450,10 +507,77 @@ public class DatabaseManager {
             return null;
         }
         if (!localTickets.containsKey(ticketId) || !localUsers.containsKey(sender)) return null;
-        Models.TicketChatMessage message = new Models.TicketChatMessage(ticketId, sender, content, sentAt);
+        Models.TicketChatMessage message = new Models.TicketChatMessage(
+                localTicketChatSequence.incrementAndGet(), ticketId, sender, content, sentAt, false);
         localTicketChat.computeIfAbsent(ticketId, key -> new ArrayList<>()).add(message);
         return message;
     }
+
+    public synchronized void markTicketChatRead(String ticketId, String username) {
+        if (useMySQL) {
+            String sql = "INSERT IGNORE INTO ticket_message_reads (message_id, username) "
+                    + "SELECT id, ? FROM ticket_messages WHERE ticket_id = ? AND sender <> ?";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, username);
+                ps.setString(2, ticketId);
+                ps.setString(3, username);
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                System.err.println("[F11] Lỗi đánh dấu tin nhắn đã đọc: " + e.getMessage());
+            }
+            return;
+        }
+        List<Models.TicketChatMessage> messages = localTicketChat.get(ticketId);
+        if (messages == null) return;
+        for (Models.TicketChatMessage message : messages) {
+            if (!message.sender.equalsIgnoreCase(username)) {
+                localTicketChatReads.computeIfAbsent(message.id, key -> ConcurrentHashMap.newKeySet()).add(username);
+            }
+        }
+    }
+
+    public synchronized Map<String, Integer> getUnreadTicketChatCounts(String username, String role) {
+        Map<String, Integer> counts = new java.util.HashMap<>();
+        if (useMySQL) {
+            String sql = "SELECT m.ticket_id, COUNT(*) AS unread_count "
+                    + "FROM ticket_messages m JOIN tickets t ON t.id = m.ticket_id "
+                    + "LEFT JOIN ticket_message_reads r ON r.message_id = m.id AND r.username = ? "
+                    + "WHERE m.sender <> ? AND r.message_id IS NULL "
+                    + "AND (? = 'admin' OR t.owner = ? OR t.assigned_tech = ?) "
+                    + "GROUP BY m.ticket_id";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, username);
+                ps.setString(2, username);
+                ps.setString(3, role);
+                ps.setString(4, username);
+                ps.setString(5, username);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) counts.put(rs.getString("ticket_id"), rs.getInt("unread_count"));
+                }
+            } catch (SQLException e) {
+                System.err.println("[F11] Lỗi thống kê tin nhắn chưa đọc: " + e.getMessage());
+            }
+            return counts;
+        }
+        localTicketChat.forEach((ticketId, messages) -> {
+            Models.Ticket ticket = localTickets.get(ticketId);
+            if (ticket == null || !("admin".equalsIgnoreCase(role)
+                    || username.equalsIgnoreCase(ticket.owner)
+                    || username.equalsIgnoreCase(ticket.assignedTech))) return;
+            int unread = 0;
+            for (Models.TicketChatMessage message : messages) {
+                if (!message.sender.equalsIgnoreCase(username)
+                        && !localTicketChatReads.getOrDefault(message.id, java.util.Set.of()).contains(username)) {
+                    unread++;
+                }
+            }
+            if (unread > 0) counts.put(ticketId, unread);
+        });
+        return counts;
+    }
+
+    private final Map<Long, java.util.Set<String>> localTicketChatReads = new ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicLong localTicketChatSequence = new java.util.concurrent.atomic.AtomicLong();
 
     // ==================== F04: PHÂN CÔNG KỸ THUẬT VIÊN ====================
     public boolean assignTechnician(String ticketId, String techUsername, String assignedBy) {
@@ -563,11 +687,13 @@ public class DatabaseManager {
     }
 
     public boolean addUser(Models.User user) throws SQLException {
+        String storedPassword = PasswordHasher.isEncoded(user.password)
+                ? user.password : PasswordHasher.hash(user.password);
         if (useMySQL) {
             String sql = "INSERT INTO users (username, password, display_name, role, status) VALUES (?, ?, ?, ?, ?)";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, user.username);
-                ps.setString(2, user.password);
+                ps.setString(2, storedPassword);
                 ps.setString(3, user.displayName);
                 ps.setString(4, user.role);
                 ps.setString(5, user.status);
@@ -583,7 +709,8 @@ public class DatabaseManager {
             }
         }
         if (localUsers.containsKey(user.username)) return false;
-        localUsers.put(user.username, user);
+        localUsers.put(user.username, new Models.User(user.username, storedPassword,
+                user.displayName, user.role, user.status));
         return true;
     }
 
