@@ -44,7 +44,7 @@ public final class NetworkIntegrationTests {
             clients.add(admin);
 
             testRoleAuthorization(requester, technician, admin);
-            testAdminTicketManagement(db, requester, admin);
+            testAdminTicketManagement(db, requester, technician, admin);
             testSlaAlerts(db, server, requester, technician);
             testChatAttachment(requester, technician);
             testChatReadStatus(db, requester, technician);
@@ -127,7 +127,7 @@ public final class NetworkIntegrationTests {
     }
 
     private static void testAdminTicketManagement(DatabaseManager db, TestClient requester,
-                                                   TestClient admin) throws Exception {
+                                                   TestClient technician, TestClient admin) throws Exception {
         String ticketId = "YC-2026-TEST-ADMIN";
         Models.Ticket fixture = new Models.Ticket(ticketId, "Admin test ticket", "IT", "Thấp",
                 "2026-10-26", "Mới", "user02", "Chưa phân công", "test fixture", 0, "");
@@ -136,6 +136,9 @@ public final class NetworkIntegrationTests {
         Protocol.Packet denied = requester.request(new Protocol.Packet(Protocol.CMD_UPDATE_TICKET, "", "",
                 new AdminTicketManagement.UpdateRequest(ticketId, "forbidden", "IT", "Thấp", "test")));
         check(Protocol.STATUS_ERROR.equals(denied.status), "requester cannot edit tickets");
+        Protocol.Packet technicianDenied = technician.request(new Protocol.Packet(Protocol.CMD_UPDATE_TICKET, "", "",
+                new AdminTicketManagement.UpdateRequest(ticketId, "forbidden", "IT", "Thấp", "test")));
+        check(Protocol.STATUS_ERROR.equals(technicianDenied.status), "technician cannot edit tickets");
         Protocol.Packet update = admin.request(new Protocol.Packet(Protocol.CMD_UPDATE_TICKET, "", "",
                 new AdminTicketManagement.UpdateRequest(ticketId, "Edited by admin", "IT", "Cao", "updated")));
         check(Protocol.STATUS_SUCCESS.equals(update.status), "admin can edit ticket fields");

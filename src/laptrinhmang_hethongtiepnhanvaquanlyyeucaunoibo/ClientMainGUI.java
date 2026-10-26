@@ -391,7 +391,7 @@ public class ClientMainGUI {
         root.setBackground(LIGHT_BG);
 
         // Header trên cùng
-        JPanel header = new JPanel(new BorderLayout());
+        JPanel header = new JPanel(new GridLayout(2, 1, 0, 8));
         header.setBackground(NAVY);
         header.setBorder(new EmptyBorder(14, 24, 14, 24));
 
@@ -421,8 +421,8 @@ public class ClientMainGUI {
         userPanel.add(btnAudit);
         userPanel.add(btnLogout);
 
-        header.add(lblLogo, BorderLayout.WEST);
-        header.add(userPanel, BorderLayout.EAST);
+        header.add(lblLogo);
+        header.add(userPanel);
         root.add(header, BorderLayout.NORTH);
 
         // Body Content
@@ -680,7 +680,7 @@ public class ClientMainGUI {
     }
 
     private void showEditTicketDialog(Models.Ticket ticket) {
-        if (!"admin".equalsIgnoreCase(currentUser.role)) return;
+        if (currentUser == null || !"admin".equalsIgnoreCase(currentUser.role)) return;
         JTextField title = new JTextField(ticket.title);
         JTextField category = new JTextField(ticket.category);
         JComboBox<String> priority = new JComboBox<>(new String[]{"Thấp", "Bình thường", "Cao", "Khẩn cấp"});
@@ -688,11 +688,16 @@ public class ClientMainGUI {
         JTextArea detail = new JTextArea(ticket.detail, 5, 24);
         detail.setLineWrap(true);
         detail.setWrapStyleWord(true);
-        JPanel form = new JPanel(new GridLayout(0, 1, 5, 5));
-        form.add(new JLabel("Tiêu đề:")); form.add(title);
-        form.add(new JLabel("Danh mục:")); form.add(category);
-        form.add(new JLabel("Ưu tiên:")); form.add(priority);
-        form.add(new JLabel("Mô tả:")); form.add(new JScrollPane(detail));
+        JScrollPane detailScroll = new JScrollPane(detail);
+        detailScroll.setPreferredSize(new Dimension(450, 140));
+
+        JPanel form = new JPanel(new GridBagLayout());
+        form.setBorder(new EmptyBorder(8, 8, 8, 8));
+        form.setPreferredSize(new Dimension(480, 390));
+        addEditTicketField(form, 0, "Tiêu đề:", title, 0);
+        addEditTicketField(form, 2, "Danh mục:", category, 0);
+        addEditTicketField(form, 4, "Ưu tiên:", priority, 0);
+        addEditTicketField(form, 6, "Mô tả:", detailScroll, 1);
         if (JOptionPane.showConfirmDialog(mainFrame, form, "Admin sửa yêu cầu " + ticket.id,
                 JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE) != JOptionPane.OK_OPTION) return;
         if (title.getText().isBlank() || category.getText().isBlank() || detail.getText().isBlank()) {
@@ -717,6 +722,24 @@ public class ClientMainGUI {
                         "Không thể sửa yêu cầu", JOptionPane.ERROR_MESSAGE));
             }
         }, "admin-edit-ticket").start();
+    }
+
+    private void addEditTicketField(JPanel form, int row, String label, JComponent field, double weighty) {
+        GridBagConstraints constraints = new GridBagConstraints();
+        constraints.gridx = 0;
+        constraints.gridwidth = 1;
+        constraints.weightx = 1;
+        constraints.anchor = GridBagConstraints.WEST;
+        constraints.fill = GridBagConstraints.HORIZONTAL;
+        constraints.insets = new Insets(5, 0, 3, 0);
+        constraints.gridy = row;
+        form.add(new JLabel(label), constraints);
+
+        constraints.gridy = row + 1;
+        constraints.weighty = weighty;
+        constraints.fill = weighty > 0 ? GridBagConstraints.BOTH : GridBagConstraints.HORIZONTAL;
+        constraints.insets = new Insets(0, 0, 8, 0);
+        form.add(field, constraints);
     }
 
     private void deleteTicket(String ticketId) {
