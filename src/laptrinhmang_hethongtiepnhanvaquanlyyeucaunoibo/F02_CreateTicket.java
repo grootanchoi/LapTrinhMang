@@ -44,6 +44,9 @@ public class F02_CreateTicket {
         if (user == null) {
             return Protocol.Packet.error(Protocol.CMD_CREATE_TICKET, "Bạn cần đăng nhập.");
         }
+        if (!"requester".equalsIgnoreCase(user.role)) {
+            return Protocol.Packet.error(Protocol.CMD_CREATE_TICKET, "Chỉ người gửi yêu cầu mới được tạo yêu cầu hỗ trợ.");
+        }
         if (!(requestPacket.data instanceof CreateTicketRequest req)) {
             return Protocol.Packet.error(Protocol.CMD_CREATE_TICKET, "Dữ liệu yêu cầu không đúng định dạng.");
         }
@@ -83,6 +86,8 @@ public class F02_CreateTicket {
 
         // Ghi lại lịch sử khởi tạo
         db.recordHistory(newTicketId, "Khởi tạo yêu cầu", user.username, "Yêu cầu được gửi lên hệ thống");
+        db.recordAuditEvent("TICKET_CREATED", newTicketId, user.username,
+                "Tạo yêu cầu mới: " + ticket.title + " (ưu tiên " + ticket.priority + ")");
 
         // 4. Phát sinh sự kiện Socket và thông báo tới các Client đang kết nối (F06)
         if (broadcaster != null) {

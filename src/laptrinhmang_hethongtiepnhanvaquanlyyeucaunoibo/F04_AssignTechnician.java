@@ -96,6 +96,8 @@ public class F04_AssignTechnician {
         if (!ok) {
             return Protocol.Packet.error(Protocol.CMD_ASSIGN_TECH, "Lỗi khi cập nhật phân công trong CSDL.");
         }
+        db.recordAuditEvent("TICKET_ASSIGNED", req.ticketId, user.username,
+                "Phân công kỹ thuật viên " + req.techUsername);
 
         // Thông báo qua Socket tới kỹ thuật viên và người gửi (F06)
         if (broadcaster != null) {

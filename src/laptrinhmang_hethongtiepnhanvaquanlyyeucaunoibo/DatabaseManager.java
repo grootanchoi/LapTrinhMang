@@ -1,6 +1,11 @@
 package laptrinhmang_hethongtiepnhanvaquanlyyeucaunoibo;
 
+import java.io.IOException;
 import java.sql.*;
+import java.time.LocalDateTime;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.DayOfWeek;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -26,6 +31,8 @@ public class DatabaseManager {
     private final Map<String, Models.User> localUsers = new ConcurrentHashMap<>();
     private final Map<String, Models.Ticket> localTickets = new ConcurrentHashMap<>();
     private final Map<String, List<Models.TicketChatMessage>> localTicketChat = new ConcurrentHashMap<>();
+    private final Map<Long, Models.ChatAttachment> localChatAttachments = new ConcurrentHashMap<>();
+    private final List<Models.AuditEvent> localAuditEvents = new java.util.concurrent.CopyOnWriteArrayList<>();
     private int ticketSequence = 2;
 
     private DatabaseManager() {
@@ -67,6 +74,7 @@ public class DatabaseManager {
                 if (conn != null && !conn.isClosed()) {
                     migrateUserStatusColumn(conn);
                     ensureTicketChatTable(conn);
+                    ensureTicketManagementColumns(conn);
                     useMySQL = true;
                     System.out.println("[DatabaseManager] Kết nối MySQL thành công! Sử dụng CSDL: workdesk_db");
                 }
@@ -105,6 +113,52 @@ public class DatabaseManager {
                     + "FOREIGN KEY (message_id) REFERENCES ticket_messages(id) ON DELETE CASCADE, "
                     + "FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE) "
                     + "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+            st.executeUpdate("CREATE TABLE IF NOT EXISTS ticket_chat_attachments ("
+                    + "message_id BIGINT NOT NULL PRIMARY KEY, file_name VARCHAR(255) NOT NULL, "
+                    + "mime_type VARCHAR(100) NOT NULL, storage_name VARCHAR(80) NOT NULL, "
+                    + "file_size BIGINT NOT NULL, sha256 CHAR(64) NOT NULL, "
+                    + "FOREIGN KEY (message_id) REFERENCES ticket_messages(id) ON DELETE CASCADE) "
+                    + "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+            st.executeUpdate("CREATE TABLE IF NOT EXISTS audit_events ("
+                    + "id BIGINT AUTO_INCREMENT PRIMARY KEY, event_type VARCHAR(80) NOT NULL, "
+                    + "entity_id VARCHAR(80) NOT NULL, actor VARCHAR(50) NOT NULL, detail TEXT NOT NULL, "
+                    + "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                    + "INDEX idx_audit_events_created (created_at, id), "
+                    + "INDEX idx_audit_events_entity (entity_id, id)) "
+                    + "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        }
+    }
+
+    private void ensureTicketManagementColumns(Connection conn) throws SQLException {
+        ensureColumn(conn, "sla_due_at", "DATETIME NULL");
+        ensureColumn(conn, "sla_warning_sent", "BOOLEAN NOT NULL DEFAULT FALSE");
+        ensureColumn(conn, "sla_overdue_sent", "BOOLEAN NOT NULL DEFAULT FALSE");
+        ensureColumn(conn, "deleted_at", "DATETIME NULL");
+        String select = "SELECT id, priority, created_date FROM tickets WHERE sla_due_at IS NULL";
+        try (Statement statement = conn.createStatement(); ResultSet rs = statement.executeQuery(select);
+                PreparedStatement update = conn.prepareStatement("UPDATE tickets SET sla_due_at = ? WHERE id = ?")) {
+            while (rs.next()) {
+                LocalDateTime createdAt;
+                try {
+                    createdAt = java.time.LocalDate.parse(rs.getString("created_date")).atTime(8, 0);
+                } catch (RuntimeException e) {
+                    createdAt = LocalDateTime.now();
+                }
+                LocalDateTime dueAt = BusinessHours.addWorkingHours(createdAt, slaHours(rs.getString("priority")));
+                update.setTimestamp(1, Timestamp.valueOf(dueAt));
+                update.setString(2, rs.getString("id"));
+                update.addBatch();
+            }
+            update.executeBatch();
+        }
+    }
+
+    private void ensureColumn(Connection conn, String name, String definition) throws SQLException {
+        try (ResultSet columns = conn.getMetaData().getColumns(conn.getCatalog(), null, "tickets", name)) {
+            if (columns.next()) return;
+        }
+        try (Statement statement = conn.createStatement()) {
+            statement.executeUpdate("ALTER TABLE tickets ADD COLUMN " + name + " " + definition);
         }
     }
 
@@ -203,9 +257,12 @@ public class DatabaseManager {
     }
 
     public boolean insertTicket(Models.Ticket ticket) {
+        if (ticket.slaDueAt == null || ticket.slaDueAt.isBlank()) {
+            ticket.slaDueAt = BusinessHours.addWorkingHours(LocalDateTime.now(), slaHours(ticket.priority)).toString();
+        }
         if (useMySQL) {
-            String sql = "INSERT INTO tickets (id, title, category, priority, created_date, status, owner, assigned_tech, detail, progress, attachment_name) "
-                       + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            String sql = "INSERT INTO tickets (id, title, category, priority, created_date, status, owner, assigned_tech, detail, progress, attachment_name, sla_due_at) "
+                       + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, ticket.id);
                 ps.setString(2, ticket.title);
@@ -218,6 +275,7 @@ public class DatabaseManager {
                 ps.setString(9, ticket.detail);
                 ps.setInt(10, ticket.progress);
                 ps.setString(11, ticket.attachmentName);
+                ps.setTimestamp(12, Timestamp.valueOf(LocalDateTime.parse(ticket.slaDueAt)));
                 return ps.executeUpdate() > 0;
             } catch (SQLException e) {
                 System.err.println("[DatabaseManager] Lỗi insert MySQL: " + e.getMessage());
@@ -233,11 +291,11 @@ public class DatabaseManager {
         if (useMySQL) {
             String sql;
             if ("admin".equalsIgnoreCase(role)) {
-                sql = "SELECT * FROM tickets ORDER BY id DESC";
+                sql = "SELECT * FROM tickets WHERE deleted_at IS NULL ORDER BY id DESC";
             } else if ("tech".equalsIgnoreCase(role)) {
-                sql = "SELECT * FROM tickets WHERE assigned_tech = ? OR status = 'Mới' ORDER BY id DESC";
+                sql = "SELECT * FROM tickets WHERE deleted_at IS NULL AND (assigned_tech = ? OR status = 'Mới') ORDER BY id DESC";
             } else {
-                sql = "SELECT * FROM tickets WHERE owner = ? ORDER BY id DESC";
+                sql = "SELECT * FROM tickets WHERE deleted_at IS NULL AND owner = ? ORDER BY id DESC";
             }
 
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -246,19 +304,7 @@ public class DatabaseManager {
                 }
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
-                        list.add(new Models.Ticket(
-                                rs.getString("id"),
-                                rs.getString("title"),
-                                rs.getString("category"),
-                                rs.getString("priority"),
-                                rs.getString("created_date"),
-                                rs.getString("status"),
-                                rs.getString("owner"),
-                                rs.getString("assigned_tech"),
-                                rs.getString("detail"),
-                                rs.getInt("progress"),
-                                rs.getString("attachment_name")
-                        ));
+                        list.add(ticketFromResult(rs));
                     }
                     return list;
                 }
@@ -269,6 +315,7 @@ public class DatabaseManager {
 
         // Fallback
         for (Models.Ticket t : localTickets.values()) {
+            if (t.deleted) continue;
             if ("admin".equalsIgnoreCase(role)) {
                 list.add(t);
             } else if ("tech".equalsIgnoreCase(role)) {
@@ -292,7 +339,7 @@ public class DatabaseManager {
         String cat = category == null ? "" : category.trim();
         String pri = priority == null ? "" : priority.trim();
         if (useMySQL) {
-            StringBuilder sql = new StringBuilder("SELECT * FROM tickets WHERE 1=1");
+            StringBuilder sql = new StringBuilder("SELECT * FROM tickets WHERE deleted_at IS NULL");
             if ("requester".equalsIgnoreCase(role)) sql.append(" AND owner = ?");
             else if ("tech".equalsIgnoreCase(role)) sql.append(" AND (assigned_tech = ? OR status = 'Mới')");
             if (!q.isEmpty()) sql.append(" AND (id LIKE ? OR title LIKE ? OR category LIKE ? OR detail LIKE ? OR owner LIKE ? OR assigned_tech LIKE ?)");
@@ -329,8 +376,9 @@ public class DatabaseManager {
         String from = dateFrom == null ? "" : dateFrom.trim(), to = dateTo == null ? "" : dateTo.trim();
         if (useMySQL) {
             String access = "";
-            if ("requester".equalsIgnoreCase(role)) access = " WHERE owner = ?";
-            else if ("tech".equalsIgnoreCase(role)) access = " WHERE (assigned_tech = ? OR status = 'Mới')";
+            access = " WHERE deleted_at IS NULL";
+            if ("requester".equalsIgnoreCase(role)) access += " AND owner = ?";
+            else if ("tech".equalsIgnoreCase(role)) access += " AND (assigned_tech = ? OR status = 'Mới')";
             if (!from.isEmpty()) access += (access.isEmpty() ? " WHERE" : " AND") + " created_date >= ?";
             if (!to.isEmpty()) access += (access.isEmpty() ? " WHERE" : " AND") + " created_date <= ?";
             try (Connection c = getConnection()) {
@@ -362,9 +410,176 @@ public class DatabaseManager {
     }
 
     private Models.Ticket ticketFromResult(ResultSet rs) throws SQLException {
-        return new Models.Ticket(rs.getString("id"), rs.getString("title"), rs.getString("category"), rs.getString("priority"),
+        Models.Ticket ticket = new Models.Ticket(rs.getString("id"), rs.getString("title"), rs.getString("category"), rs.getString("priority"),
                 rs.getString("created_date"), rs.getString("status"), rs.getString("owner"), rs.getString("assigned_tech"),
                 rs.getString("detail"), rs.getInt("progress"), rs.getString("attachment_name"));
+        Timestamp dueAt = rs.getTimestamp("sla_due_at");
+        ticket.slaDueAt = dueAt == null ? null : dueAt.toLocalDateTime().toString();
+        ticket.slaWarningSent = rs.getBoolean("sla_warning_sent");
+        ticket.slaOverdueSent = rs.getBoolean("sla_overdue_sent");
+        ticket.deleted = rs.getTimestamp("deleted_at") != null;
+        return ticket;
+    }
+
+    public boolean updateTicketForAdmin(Models.Ticket updated, String actor) {
+        Models.Ticket previous = getTicketById(updated.id);
+        if (previous == null) return false;
+        String previousDetail = "title=" + previous.title + "; category=" + previous.category
+                + "; priority=" + previous.priority;
+        boolean priorityChanged = previous.priority == null
+                || !previous.priority.equalsIgnoreCase(updated.priority);
+        String dueAt = priorityChanged
+                ? BusinessHours.addWorkingHours(LocalDateTime.now(), slaHours(updated.priority)).toString()
+                : previous.slaDueAt;
+        if (useMySQL) {
+            String sql = "UPDATE tickets SET title = ?, category = ?, priority = ?, detail = ?, sla_due_at = ?, "
+                    + "sla_warning_sent = IF(?, FALSE, sla_warning_sent), "
+                    + "sla_overdue_sent = IF(?, FALSE, sla_overdue_sent) "
+                    + "WHERE id = ? AND deleted_at IS NULL";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, updated.title);
+                ps.setString(2, updated.category);
+                ps.setString(3, updated.priority);
+                ps.setString(4, updated.detail);
+                ps.setTimestamp(5, Timestamp.valueOf(dueAt));
+                ps.setBoolean(6, priorityChanged);
+                ps.setBoolean(7, priorityChanged);
+                ps.setString(8, updated.id);
+                if (ps.executeUpdate() == 0) return false;
+            } catch (SQLException e) {
+                System.err.println("[F02] Lỗi admin cập nhật yêu cầu: " + e.getMessage());
+                return false;
+            }
+        } else {
+            Models.Ticket current = localTickets.get(updated.id);
+            if (current == null || current.deleted) return false;
+            current.title = updated.title;
+            current.category = updated.category;
+            current.priority = updated.priority;
+            current.detail = updated.detail;
+            if (priorityChanged) {
+                current.slaDueAt = dueAt;
+                current.slaWarningSent = false;
+                current.slaOverdueSent = false;
+            }
+        }
+        recordHistory(updated.id, "Admin chỉnh sửa nội dung yêu cầu", actor,
+                previousDetail + " => title=" + updated.title + "; category=" + updated.category
+                        + "; priority=" + updated.priority);
+        recordAuditEvent("TICKET_UPDATED", updated.id, actor,
+                "Admin đã chỉnh sửa tiêu đề, danh mục, ưu tiên hoặc mô tả.");
+        return true;
+    }
+
+    public boolean softDeleteTicket(String ticketId, String actor) {
+        Models.Ticket ticket = getTicketById(ticketId);
+        if (ticket == null) return false;
+        if (useMySQL) {
+            try (Connection conn = getConnection();
+                    PreparedStatement ps = conn.prepareStatement(
+                            "UPDATE tickets SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL")) {
+                ps.setString(1, ticketId);
+                if (ps.executeUpdate() == 0) return false;
+            } catch (SQLException e) {
+                System.err.println("[F02] Lỗi xóa mềm yêu cầu: " + e.getMessage());
+                return false;
+            }
+        } else {
+            ticket.deleted = true;
+        }
+        recordHistory(ticketId, "Admin xóa mềm yêu cầu", actor, "Dữ liệu được giữ để kiểm toán.");
+        recordAuditEvent("TICKET_SOFT_DELETED", ticketId, actor, "Admin ẩn yêu cầu; lịch sử và chat được giữ lại.");
+        return true;
+    }
+
+    public void recordAuditEvent(String eventType, String entityId, String actor, String detail) {
+        String createdAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        if (useMySQL) {
+            String sql = "INSERT INTO audit_events (event_type, entity_id, actor, detail) VALUES (?, ?, ?, ?)";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, eventType);
+                ps.setString(2, entityId == null ? "" : entityId);
+                ps.setString(3, actor == null ? "system" : actor);
+                ps.setString(4, detail == null ? "" : detail);
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                System.err.println("[Audit] Không lưu được sự kiện kiểm toán: " + e.getMessage());
+            }
+            return;
+        }
+        localAuditEvents.add(new Models.AuditEvent(eventType, entityId, actor, detail, createdAt));
+    }
+
+    public List<Models.AuditEvent> getAuditEvents(int limit) {
+        List<Models.AuditEvent> events = new ArrayList<>();
+        int boundedLimit = Math.max(1, Math.min(limit, 1000));
+        if (useMySQL) {
+            String sql = "SELECT event_type, entity_id, actor, detail, "
+                    + "DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at "
+                    + "FROM audit_events ORDER BY id DESC LIMIT ?";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setInt(1, boundedLimit);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) events.add(new Models.AuditEvent(rs.getString("event_type"),
+                            rs.getString("entity_id"), rs.getString("actor"), rs.getString("detail"),
+                            rs.getString("created_at")));
+                }
+            } catch (SQLException e) {
+                System.err.println("[Audit] Không tải được nhật ký kiểm toán: " + e.getMessage());
+            }
+            return events;
+        }
+        for (int i = localAuditEvents.size() - 1; i >= 0 && events.size() < boundedLimit; i--) {
+            events.add(localAuditEvents.get(i));
+        }
+        return events;
+    }
+
+    public List<Models.Ticket> getSlaCandidates() {
+        if (useMySQL) {
+            List<Models.Ticket> tickets = new ArrayList<>();
+            String sql = "SELECT * FROM tickets WHERE deleted_at IS NULL "
+                    + "AND status NOT IN ('Hoàn thành', 'Đã hủy') AND sla_due_at IS NOT NULL";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql);
+                    ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) tickets.add(ticketFromResult(rs));
+            } catch (SQLException e) {
+                System.err.println("[SLA] Không tải được danh sách yêu cầu cần giám sát: " + e.getMessage());
+            }
+            return tickets;
+        }
+        return localTickets.values().stream()
+                .filter(ticket -> !ticket.deleted && ticket.slaDueAt != null
+                        && !"Hoàn thành".equalsIgnoreCase(ticket.status)
+                        && !"Đã hủy".equalsIgnoreCase(ticket.status))
+                .toList();
+    }
+
+    public boolean markSlaAlertSent(String ticketId, boolean overdue) {
+        Models.Ticket ticket = getTicketById(ticketId);
+        if (ticket == null) return false;
+        String column = overdue ? "sla_overdue_sent" : "sla_warning_sent";
+        if (useMySQL) {
+            String sql = "UPDATE tickets SET " + column + " = TRUE WHERE id = ? AND " + column + " = FALSE";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, ticketId);
+                return ps.executeUpdate() > 0;
+            } catch (SQLException e) {
+                System.err.println("[SLA] Không thể ghi nhận cảnh báo: " + e.getMessage());
+                return false;
+            }
+        }
+        if (overdue ? ticket.slaOverdueSent : ticket.slaWarningSent) return false;
+        if (overdue) ticket.slaOverdueSent = true;
+        else ticket.slaWarningSent = true;
+        return true;
+    }
+
+    private static double slaHours(String priority) {
+        if ("Khẩn cấp".equalsIgnoreCase(priority)) return 4;
+        if ("Cao".equalsIgnoreCase(priority)) return 24;
+        if ("Thấp".equalsIgnoreCase(priority)) return 120;
+        return 72;
     }
 
     // F10: lấy timeline và upsert đánh giá một lần cho mỗi yêu cầu.
@@ -406,29 +621,18 @@ public class DatabaseManager {
 
     public Models.Ticket getTicketById(String id) {
         if (useMySQL) {
-            String sql = "SELECT * FROM tickets WHERE id = ?";
+            String sql = "SELECT * FROM tickets WHERE id = ? AND deleted_at IS NULL";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, id);
                 try (ResultSet rs = ps.executeQuery()) {
                     if (rs.next()) {
-                        return new Models.Ticket(
-                                rs.getString("id"),
-                                rs.getString("title"),
-                                rs.getString("category"),
-                                rs.getString("priority"),
-                                rs.getString("created_date"),
-                                rs.getString("status"),
-                                rs.getString("owner"),
-                                rs.getString("assigned_tech"),
-                                rs.getString("detail"),
-                                rs.getInt("progress"),
-                                rs.getString("attachment_name")
-                        );
+                        return ticketFromResult(rs);
                     }
                 }
             } catch (SQLException ignored) {}
         }
-        return localTickets.get(id);
+        Models.Ticket ticket = localTickets.get(id);
+        return ticket == null || ticket.deleted ? null : ticket;
     }
 
     public synchronized List<Models.TicketChatMessage> getTicketChatMessages(String ticketId, String username) {
@@ -436,20 +640,26 @@ public class DatabaseManager {
         if (useMySQL) {
             String sql = "SELECT m.id, m.ticket_id, m.sender, m.content, "
                     + "DATE_FORMAT(m.sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at, "
+                    + "a.file_name, a.mime_type, a.file_size, "
                     + "CASE WHEN m.sender = ? THEN EXISTS (SELECT 1 FROM ticket_message_reads r "
                     + "WHERE r.message_id = m.id AND r.username <> m.sender) "
                     + "ELSE EXISTS (SELECT 1 FROM ticket_message_reads r "
                     + "WHERE r.message_id = m.id AND r.username = ?) END AS is_read "
-                    + "FROM ticket_messages m WHERE m.ticket_id = ? ORDER BY m.id ASC";
+                    + "FROM ticket_messages m LEFT JOIN ticket_chat_attachments a ON a.message_id = m.id "
+                    + "WHERE m.ticket_id = ? ORDER BY m.id ASC";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, username);
                 ps.setString(2, username);
                 ps.setString(3, ticketId);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
-                        messages.add(new Models.TicketChatMessage(rs.getLong("id"), rs.getString("ticket_id"),
+                        Models.TicketChatMessage message = new Models.TicketChatMessage(rs.getLong("id"), rs.getString("ticket_id"),
                                 rs.getString("sender"), rs.getString("content"), rs.getString("sent_at"),
-                                rs.getBoolean("is_read")));
+                                rs.getBoolean("is_read"));
+                        message.attachmentName = rs.getString("file_name");
+                        message.attachmentMimeType = rs.getString("mime_type");
+                        message.attachmentSize = rs.getLong("file_size");
+                        messages.add(message);
                     }
                 }
             } catch (SQLException e) {
@@ -467,6 +677,13 @@ public class DatabaseManager {
                         : localTicketChatReads.getOrDefault(message.id, java.util.Set.of()).contains(username);
                 messages.add(new Models.TicketChatMessage(message.id, message.ticketId, message.sender,
                         message.content, message.sentAt, isRead));
+                Models.TicketChatMessage copy = messages.get(messages.size() - 1);
+                Models.ChatAttachment attachment = localChatAttachments.get(message.id);
+                if (attachment != null) {
+                    copy.attachmentName = attachment.fileName;
+                    copy.attachmentMimeType = attachment.mimeType;
+                    copy.attachmentSize = attachment.fileSize;
+                }
             }
         }
         return messages;
@@ -578,6 +795,99 @@ public class DatabaseManager {
 
     private final Map<Long, java.util.Set<String>> localTicketChatReads = new ConcurrentHashMap<>();
     private final java.util.concurrent.atomic.AtomicLong localTicketChatSequence = new java.util.concurrent.atomic.AtomicLong();
+
+    public boolean storeChatAttachment(long messageId, String fileName, String mimeType,
+                                       String storageName, byte[] bytes, String sha256) {
+        if (useMySQL) {
+            String sql = "INSERT INTO ticket_chat_attachments "
+                    + "(message_id, file_name, mime_type, storage_name, file_size, sha256) VALUES (?, ?, ?, ?, ?, ?)";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setLong(1, messageId);
+                ps.setString(2, fileName);
+                ps.setString(3, mimeType);
+                ps.setString(4, storageName);
+                ps.setLong(5, bytes.length);
+                ps.setString(6, sha256);
+                return ps.executeUpdate() > 0;
+            } catch (SQLException e) {
+                System.err.println("[F11] Không lưu được metadata tệp chat: " + e.getMessage());
+                return false;
+            }
+        }
+        localChatAttachments.put(messageId,
+                new Models.ChatAttachment(messageId, fileName, mimeType, bytes.length, bytes.clone()));
+        return true;
+    }
+
+    public Models.ChatAttachment getChatAttachment(long messageId) {
+        if (useMySQL) {
+            String sql = "SELECT file_name, mime_type, storage_name, file_size, sha256 "
+                    + "FROM ticket_chat_attachments WHERE message_id = ?";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setLong(1, messageId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) return null;
+                    long size = rs.getLong("file_size");
+                    if (size < 0 || size > 10L * 1024 * 1024) {
+                        throw new IOException("Kích thước tệp đính kèm lưu trên máy chủ không hợp lệ.");
+                    }
+                    Path path = Path.of(FileTransferHelper.SERVER_STORAGE_DIR, rs.getString("storage_name"));
+                    byte[] bytes = Files.readAllBytes(path);
+                    if (bytes.length != size) throw new IOException("Tệp đính kèm trên máy chủ không toàn vẹn.");
+                    String actualHash = java.util.HexFormat.of().formatHex(
+                            java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
+                    if (!actualHash.equalsIgnoreCase(rs.getString("sha256"))) {
+                        throw new IOException("Checksum SHA-256 của tệp đính kèm không khớp.");
+                    }
+                    return new Models.ChatAttachment(messageId, rs.getString("file_name"),
+                            rs.getString("mime_type"), size, bytes);
+                }
+            } catch (Exception e) {
+                System.err.println("[F11] Không tải được tệp chat: " + e.getMessage());
+                return null;
+            }
+        }
+        Models.ChatAttachment attachment = localChatAttachments.get(messageId);
+        return attachment == null ? null : new Models.ChatAttachment(messageId, attachment.fileName,
+                attachment.mimeType, attachment.fileSize, attachment.bytes.clone());
+    }
+
+    public synchronized void deleteTicketChatMessage(long messageId) {
+        if (useMySQL) {
+            try (Connection conn = getConnection();
+                    PreparedStatement ps = conn.prepareStatement("DELETE FROM ticket_messages WHERE id = ?")) {
+                ps.setLong(1, messageId);
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                System.err.println("[F11] Không xóa được tin nhắn tải tệp thất bại: " + e.getMessage());
+            }
+            return;
+        }
+        for (List<Models.TicketChatMessage> messages : localTicketChat.values()) {
+            messages.removeIf(message -> message.id == messageId);
+        }
+        localChatAttachments.remove(messageId);
+        localTicketChatReads.remove(messageId);
+    }
+
+    public String getTicketIdForChatMessage(long messageId) {
+        if (useMySQL) {
+            try (Connection conn = getConnection();
+                    PreparedStatement ps = conn.prepareStatement("SELECT ticket_id FROM ticket_messages WHERE id = ?")) {
+                ps.setLong(1, messageId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getString("ticket_id") : null;
+                }
+            } catch (SQLException e) {
+                System.err.println("[F11] Không xác định được yêu cầu của tệp chat: " + e.getMessage());
+                return null;
+            }
+        }
+        for (Map.Entry<String, List<Models.TicketChatMessage>> entry : localTicketChat.entrySet()) {
+            if (entry.getValue().stream().anyMatch(message -> message.id == messageId)) return entry.getKey();
+        }
+        return null;
+    }
 
     // ==================== F04: PHÂN CÔNG KỸ THUẬT VIÊN ====================
     public boolean assignTechnician(String ticketId, String techUsername, String assignedBy) {

@@ -117,6 +117,8 @@ public class F05_UpdateProgress {
         if (!ok) {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Lỗi cập nhật CSDL MySQL.");
         }
+        db.recordAuditEvent("TICKET_PROGRESS_UPDATED", req.ticketId, user.username,
+                "Tiến độ " + req.progressPercent + "%; trạng thái " + effectiveStatus);
 
         // 6. Phát thông báo thay đổi trạng thái tới các Socket (F06)
         if (broadcaster != null) {

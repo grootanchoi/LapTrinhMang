@@ -25,6 +25,12 @@ public class Protocol {
     public static final String CMD_GET_TICKET_CHAT = "CMD_GET_TICKET_CHAT";
     public static final String CMD_SEND_TICKET_CHAT = "CMD_SEND_TICKET_CHAT";
     public static final String CMD_GET_UNREAD_CHAT_COUNTS = "CMD_GET_UNREAD_CHAT_COUNTS";
+    public static final String CMD_GET_CHAT_ATTACHMENT = "CMD_GET_CHAT_ATTACHMENT";
+    public static final String CMD_GET_AUDIT_LOG = "CMD_GET_AUDIT_LOG";
+    public static final String CMD_UPDATE_TICKET = "CMD_UPDATE_TICKET";
+    public static final String CMD_DELETE_TICKET = "CMD_DELETE_TICKET";
+    public static final String CMD_PING = "CMD_PING";
+    public static final String CMD_PONG = "CMD_PONG";
 
     // F04 - Tiếp nhận & Phân công kỹ thuật viên, Tải file đính kèm
     public static final String CMD_ASSIGN_TECH = "CMD_ASSIGN_TECH";

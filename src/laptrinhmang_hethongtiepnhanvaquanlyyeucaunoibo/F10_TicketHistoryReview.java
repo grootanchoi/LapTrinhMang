@@ -31,6 +31,8 @@ public class F10_TicketHistoryReview {
         if (!"Hoàn thành".equalsIgnoreCase(ticket.status))
             return Protocol.Packet.error(Protocol.CMD_RATE_TICKET, "Chỉ có thể đánh giá yêu cầu đã hoàn thành.");
         boolean ok = DatabaseManager.getInstance().saveTicketReview(req.ticketId, user.username, req.rating, req.comment);
+        if (ok) DatabaseManager.getInstance().recordAuditEvent("TICKET_REVIEWED", req.ticketId,
+                user.username, "Đánh giá " + req.rating + "/5.");
         return ok ? Protocol.Packet.success(Protocol.CMD_RATE_TICKET, "Đã lưu đánh giá.", null)
                 : Protocol.Packet.error(Protocol.CMD_RATE_TICKET, "Không thể lưu đánh giá vào cơ sở dữ liệu.");
     }

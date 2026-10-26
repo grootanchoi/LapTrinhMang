@@ -8,6 +8,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableModel;
@@ -26,6 +28,7 @@ public class ServerMain {
     private ServerSocket serverSocket;
     private boolean isRunning = false;
     private ExecutorService threadPool;
+    private ScheduledExecutorService slaMonitor;
     private final F06_NotificationBroadcaster broadcaster = new F06_NotificationBroadcaster();
 
     // UI Components for Server Control Panel
@@ -145,6 +148,8 @@ public class ServerMain {
             serverSocket = NetworkSecurityConfig.createServerSocket(port);
             isRunning = true;
             threadPool = Executors.newCachedThreadPool();
+            slaMonitor = Executors.newSingleThreadScheduledExecutor();
+            slaMonitor.scheduleAtFixedRate(this::checkSlaDeadlines, 0, 1, TimeUnit.MINUTES);
 
             log("Máy chủ TCP đã khởi động thành công trên cổng: " + port);
             log(NetworkSecurityConfig.isTlsEnabled()
@@ -186,7 +191,9 @@ public class ServerMain {
         isRunning = false;
         try {
             if (serverSocket != null) serverSocket.close();
+            broadcaster.closeAllSessions();
             if (threadPool != null) threadPool.shutdownNow();
+            if (slaMonitor != null) slaMonitor.shutdownNow();
             log("Máy chủ đã dừng.");
         } catch (IOException e) {
             log("Lỗi dừng máy chủ: " + e.getMessage());
@@ -199,6 +206,43 @@ public class ServerMain {
 
     public ServerMetrics getMetrics() {
         return metrics;
+    }
+
+    void checkSlaDeadlines() {
+        DatabaseManager db = DatabaseManager.getInstance();
+        LocalDateTime now = LocalDateTime.now();
+        for (Models.Ticket ticket : db.getSlaCandidates()) {
+            if (ticket.slaDueAt == null) continue;
+            try {
+                LocalDateTime dueAt = LocalDateTime.parse(ticket.slaDueAt);
+                double remainingHours = BusinessHours.workingHoursBetween(now, dueAt);
+                boolean overdue = !dueAt.isAfter(now);
+                if (overdue && !ticket.slaOverdueSent && db.markSlaAlertSent(ticket.id, true)) {
+                    sendSlaAlert(ticket, "SLA QUÁ HẠN");
+                    db.recordAuditEvent("SLA_OVERDUE", ticket.id, "system",
+                            "Yêu cầu quá hạn xử lý theo SLA.");
+                } else if (!overdue && remainingHours <= 1.0 && !ticket.slaWarningSent
+                        && db.markSlaAlertSent(ticket.id, false)) {
+                    sendSlaAlert(ticket, "SLA SẮP ĐẾN HẠN");
+                    db.recordAuditEvent("SLA_WARNING", ticket.id, "system",
+                            "Yêu cầu còn tối đa 1 giờ làm việc trước hạn SLA.");
+                }
+            } catch (RuntimeException e) {
+                log("[SLA] Không đọc được hạn xử lý của " + ticket.id + ": " + e.getMessage());
+            }
+        }
+    }
+
+    private void sendSlaAlert(Models.Ticket ticket, String title) {
+        String message = title + ": yêu cầu [" + ticket.id + "] " + ticket.title;
+        java.util.List<String> recipients = new java.util.ArrayList<>();
+        recipients.add(ticket.owner);
+        if (ticket.assignedTech != null && !"Chưa phân công".equalsIgnoreCase(ticket.assignedTech)) {
+            recipients.add(ticket.assignedTech);
+        }
+        broadcaster.sendToUsers(recipients, "SLA_ALERT", ticket.id, message);
+        broadcaster.sendToRole("admin", "SLA_ALERT", ticket.id, message);
+        log("[SLA] " + message);
     }
 
     public void log(String message) {
@@ -272,6 +316,12 @@ public class ServerMain {
         public boolean isConnected() { return connected && !socket.isClosed(); }
 
         @Override
+        public void closeConnection() throws IOException {
+            connected = false;
+            socket.close();
+        }
+
+        @Override
         public void run() {
             String clientIp = socket.getRemoteSocketAddress().toString();
             log("[Kết nối mới] Phiên: " + sessionId + " từ " + clientIp);
@@ -342,6 +392,8 @@ public class ServerMain {
                     if (Protocol.STATUS_SUCCESS.equals(resp.status)) {
                         F01_Authentication.LoginResponse lr = (F01_Authentication.LoginResponse) resp.data;
                         this.authenticatedUser = lr.user;
+                        DatabaseManager.getInstance().recordAuditEvent("USER_LOGIN",
+                                authenticatedUser.username, authenticatedUser.username, "Đăng nhập thành công.");
                         log("[F01] Đăng nhập thành công: " + authenticatedUser.username + " (" + authenticatedUser.role + ")");
                         refreshTableSession(true);
                         updateSessionUI();
@@ -351,6 +403,7 @@ public class ServerMain {
 
                 case Protocol.CMD_CREATE_TICKET: {
                     // F02: Tạo yêu cầu hỗ trợ kỹ thuật
+                    if (!isAllowedRole("requester")) return permissionDenied(packet);
                     Protocol.Packet resp = F02_CreateTicket.handleServerCreateTicket(packet, authenticatedUser, broadcaster);
                     log("[F02] " + resp.message);
                     return resp;
@@ -391,13 +444,17 @@ public class ServerMain {
                     return F11_TicketChat.getUnreadCounts(authenticatedUser);
                 }
 
+                case Protocol.CMD_GET_CHAT_ATTACHMENT: {
+                    return F11_TicketChat.getAttachment(packet, authenticatedUser);
+                }
+
                 case Protocol.CMD_SEND_TICKET_CHAT: {
                     return F11_TicketChat.sendMessage(packet, authenticatedUser, broadcaster);
                 }
 
                 case Protocol.CMD_ASSIGN_TECH: {
                     // F04: Phân công kỹ thuật viên
-                    if (!isAllowedRole("admin", "tech")) return permissionDenied(packet);
+                    if (!isAllowedRole("admin")) return permissionDenied(packet);
                     Protocol.Packet resp = F04_AssignTechnician.handleServerAssign(packet, authenticatedUser, broadcaster);
                     log("[F04] " + resp.message);
                     return resp;
@@ -438,6 +495,26 @@ public class ServerMain {
                     // F08: Khóa / mở khóa tài khoản
                     if (!isAllowedRole("admin")) return permissionDenied(packet);
                     return F08_UserManagement.handleServerLockUser(packet, this.authenticatedUser);
+                }
+
+                case Protocol.CMD_UPDATE_TICKET: {
+                    if (!isAllowedRole("admin")) return permissionDenied(packet);
+                    return AdminTicketManagement.update(packet, authenticatedUser, broadcaster);
+                }
+
+                case Protocol.CMD_DELETE_TICKET: {
+                    if (!isAllowedRole("admin")) return permissionDenied(packet);
+                    return AdminTicketManagement.softDelete(packet, authenticatedUser, broadcaster);
+                }
+
+                case Protocol.CMD_GET_AUDIT_LOG: {
+                    if (!isAllowedRole("admin")) return permissionDenied(packet);
+                    return Protocol.Packet.success(Protocol.CMD_GET_AUDIT_LOG,
+                            "Đã tải nhật ký kiểm toán.", DatabaseManager.getInstance().getAuditEvents(500));
+                }
+
+                case Protocol.CMD_PING: {
+                    return Protocol.Packet.success(Protocol.CMD_PING, "PONG", null);
                 }
 
                 default:

@@ -27,6 +27,7 @@ public class F06_NotificationBroadcaster {
         String getRole();
         ObjectOutputStream getOutputStream();
         boolean isConnected();
+        void closeConnection() throws IOException;
     }
 
     private final List<ClientSessionHolder> activeSessions = new CopyOnWriteArrayList<>();
@@ -41,6 +42,17 @@ public class F06_NotificationBroadcaster {
         activeSessions.remove(session);
         System.out.println("[F06 Broadcaster] Hủy phiên kết nối: " + session.getSessionId()
                 + " (Còn lại: " + activeSessions.size() + " phiên)");
+    }
+
+    public void closeAllSessions() {
+        for (ClientSessionHolder session : activeSessions) {
+            try {
+                session.closeConnection();
+            } catch (IOException e) {
+                System.err.println("[F06 Broadcaster] Không thể đóng phiên "
+                        + session.getSessionId() + ": " + e.getMessage());
+            }
+        }
     }
 
     public int getActiveSessionCount() {
@@ -92,8 +104,14 @@ public class F06_NotificationBroadcaster {
     }
 
     public void sendToUsers(List<String> targetUsernames, String eventType, String ticketId, String message) {
+        sendToUsers(targetUsernames, eventType, ticketId, message, 0, null);
+    }
+
+    public void sendToUsers(List<String> targetUsernames, String eventType, String ticketId, String message,
+                            long attachmentMessageId, String attachmentName) {
         String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss dd/MM"));
-        Models.NotificationMessage notif = new Models.NotificationMessage(eventType, ticketId, message, timestamp);
+        Models.NotificationMessage notif = new Models.NotificationMessage(eventType, ticketId, message, timestamp,
+                attachmentMessageId, attachmentName);
         Protocol.Packet notifPacket = new Protocol.Packet(Protocol.CMD_NOTIFICATION, Protocol.STATUS_SUCCESS, message, notif);
 
         for (ClientSessionHolder session : activeSessions) {
@@ -111,6 +129,28 @@ public class F06_NotificationBroadcaster {
                     }
                 } catch (IOException e) {
                     System.err.println("[F06] Lỗi gửi thông báo tới phiên " + session.getSessionId() + ": " + e.getMessage());
+                }
+            }
+
+        }
+    }
+
+    public void sendToRole(String role, String eventType, String ticketId, String message) {
+        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss dd/MM"));
+        Models.NotificationMessage notif = new Models.NotificationMessage(eventType, ticketId, message, timestamp);
+        Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_NOTIFICATION, Protocol.STATUS_SUCCESS, message, notif);
+        for (ClientSessionHolder session : activeSessions) {
+            if (session.isConnected() && role.equalsIgnoreCase(session.getRole())) {
+                try {
+                    ObjectOutputStream output = session.getOutputStream();
+                    synchronized (output) {
+                        output.writeObject(packet);
+                        output.flush();
+                        output.reset();
+                    }
+                } catch (IOException e) {
+                    System.err.println("[F06] Không gửi được thông báo tới vai trò " + role + " / phiên "
+                            + session.getSessionId() + ": " + e.getMessage());
                 }
             }
         }

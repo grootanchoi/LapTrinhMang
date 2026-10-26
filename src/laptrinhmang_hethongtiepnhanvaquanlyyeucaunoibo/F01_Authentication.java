@@ -91,8 +91,9 @@ public class F01_Authentication {
      */
     public static ConnectionResult performLogin(String host, int port, String username, String password) {
         ConnectionResult res = new ConnectionResult();
+        Socket socket = null;
         try {
-            Socket socket = NetworkSecurityConfig.createClientSocket(host, port, 5000);
+            socket = NetworkSecurityConfig.createClientSocket(host, port, 5000);
 
             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
             out.flush();
@@ -128,12 +129,23 @@ public class F01_Authentication {
                 socket.close();
             }
         } catch (java.net.ConnectException e) {
+            closeFailedSocket(socket);
             res.isConnected = false;
             res.statusMessage = "Không thể kết nối đến máy chủ tại " + host + ":" + port + ". Hãy chắc chắn Server đang chạy.";
         } catch (Exception e) {
+            closeFailedSocket(socket);
             res.isConnected = false;
             res.statusMessage = "Lỗi kết nối Socket: " + e.getMessage();
         }
         return res;
+    }
+
+    private static void closeFailedSocket(Socket socket) {
+        if (socket == null || socket.isClosed()) return;
+        try {
+            socket.close();
+        } catch (IOException e) {
+            System.err.println("[F01] Không đóng được socket đăng nhập thất bại: " + e.getMessage());
+        }
     }
 }

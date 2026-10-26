@@ -30,8 +30,18 @@ CREATE TABLE IF NOT EXISTS `tickets` (
     `detail` TEXT,
     `progress` INT DEFAULT 0,
     `attachment_name` VARCHAR(255) DEFAULT '',
+    `sla_due_at` DATETIME NULL,
+    `sla_warning_sent` BOOLEAN NOT NULL DEFAULT FALSE,
+    `sla_overdue_sent` BOOLEAN NOT NULL DEFAULT FALSE,
+    `deleted_at` DATETIME NULL,
     FOREIGN KEY (`owner`) REFERENCES `users`(`username`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+ALTER TABLE `tickets`
+    ADD COLUMN IF NOT EXISTS `sla_due_at` DATETIME NULL,
+    ADD COLUMN IF NOT EXISTS `sla_warning_sent` BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS `sla_overdue_sent` BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS `deleted_at` DATETIME NULL;
 
 -- 3. Bảng lịch sử xử lý (Ticket History) - F05, F10
 CREATE TABLE IF NOT EXISTS `ticket_history` (
@@ -76,6 +86,27 @@ CREATE TABLE IF NOT EXISTS `ticket_message_reads` (
     CONSTRAINT `fk_message_read_user` FOREIGN KEY (`username`) REFERENCES `users`(`username`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `ticket_chat_attachments` (
+    `message_id` BIGINT NOT NULL PRIMARY KEY,
+    `file_name` VARCHAR(255) NOT NULL,
+    `mime_type` VARCHAR(100) NOT NULL,
+    `storage_name` VARCHAR(80) NOT NULL,
+    `file_size` BIGINT NOT NULL,
+    `sha256` CHAR(64) NOT NULL,
+    CONSTRAINT `fk_chat_attachment_message` FOREIGN KEY (`message_id`) REFERENCES `ticket_messages`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `audit_events` (
+    `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `event_type` VARCHAR(80) NOT NULL,
+    `entity_id` VARCHAR(80) NOT NULL,
+    `actor` VARCHAR(50) NOT NULL,
+    `detail` TEXT NOT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_audit_events_created` (`created_at`, `id`),
+    INDEX `idx_audit_events_entity` (`entity_id`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Chuẩn hóa dữ liệu cũ khi chạy lại script; tránh cột cũ còn charset khác.
 ALTER TABLE `users` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ALTER TABLE `tickets` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -83,6 +114,8 @@ ALTER TABLE `ticket_history` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_un
 ALTER TABLE `ticket_reviews` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ALTER TABLE `ticket_messages` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ALTER TABLE `ticket_message_reads` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+ALTER TABLE `ticket_chat_attachments` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+ALTER TABLE `audit_events` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- Thêm tài khoản mẫu ban đầu:
 -- Admin: admin / admin123

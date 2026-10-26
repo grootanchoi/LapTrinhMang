@@ -41,13 +41,13 @@ Dự án được xây dựng và chuẩn hóa theo đúng yêu cầu phân tác
 
 | Tên đăng nhập | Mật khẩu | Họ và tên | Vai trò (Role) | Chức năng có thể thao tác |
 |---|---|---|---|---|
-| **admin** | `admin123` | Quản trị viên hệ thống | `admin` | Quản lý người dùng và vai trò F08; xem mọi yêu cầu, thống kê, lịch sử; phân công, cập nhật; các chức năng còn lại |
-| **tech01** | `tech123` | Nguyễn Văn Kỹ Thuật | `tech` | Tạo yêu cầu; xem yêu cầu mới và được phân công; phân công kỹ thuật viên; cập nhật yêu cầu được phân công; thống kê, lịch sử và tệp của yêu cầu được phép xem |
-| **tech02** | `tech123` | Trần Thị Support | `tech` | Tạo yêu cầu; xem yêu cầu mới và được phân công; phân công kỹ thuật viên; cập nhật yêu cầu được phân công; thống kê, lịch sử và tệp của yêu cầu được phép xem |
-| **user01** | `user123` | Lê Văn Nhân Viên | `requester` | Tạo yêu cầu; chỉ xem, xuất, xem lịch sử và tải tệp của yêu cầu do mình gửi; đánh giá yêu cầu đã hoàn thành của mình |
-| **user02** | `user123` | Phạm Thị Kế Toán | `requester` | Tạo yêu cầu; chỉ xem, xuất, xem lịch sử và tải tệp của yêu cầu do mình gửi; đánh giá yêu cầu đã hoàn thành của mình |
+| **admin** | `admin123` | Quản trị viên hệ thống | `admin` | Quản lý tài khoản/vai trò F08; xem mọi yêu cầu và chat; phân công KTV; sửa/xóa mềm yêu cầu; xem nhật ký kiểm toán và SLA |
+| **tech01** | `tech123` | Nguyễn Văn Kỹ Thuật | `tech` | Xem yêu cầu mới và được phân công; chỉ cập nhật yêu cầu được phân công; xem chi tiết, lịch sử, tệp và chat của yêu cầu được phép |
+| **tech02** | `tech123` | Trần Thị Support | `tech` | Xem yêu cầu mới và được phân công; chỉ cập nhật yêu cầu được phân công; xem chi tiết, lịch sử, tệp và chat của yêu cầu được phép |
+| **user01** | `user123` | Lê Văn Nhân Viên | `requester` | Tạo yêu cầu; chỉ xem, xuất, xem lịch sử và tải tệp yêu cầu do mình gửi; đánh giá yêu cầu đã hoàn thành; chat với KTV phụ trách |
+| **user02** | `user123` | Phạm Thị Kế Toán | `requester` | Tạo yêu cầu; chỉ xem, xuất, xem lịch sử và tải tệp yêu cầu do mình gửi; đánh giá yêu cầu đã hoàn thành; chat với KTV phụ trách |
 
-Quản trị viên có thể gán vai trò `requester`, `tech` hoặc `admin` khi thêm tài khoản hoặc chọn **Sửa vai trò** trong F08. Chỉ admin được phân công kỹ thuật viên (F04); tech chỉ cập nhật tiến độ yêu cầu được giao cho mình. Máy chủ kiểm tra đăng nhập và quyền trên từng lệnh; tên người dùng/vai trò gửi kèm từ client không được dùng làm căn cứ phân quyền. Khi tài khoản bị khóa hoặc vai trò bị đổi, thay đổi có hiệu lực ở yêu cầu tiếp theo.
+Quản trị viên là vai trò duy nhất được tạo tài khoản và gán vai trò `requester`, `tech` hoặc `admin` trong F08. Chỉ requester được tạo yêu cầu; chỉ admin được phân công kỹ thuật viên (F04); tech chỉ cập nhật tiến độ yêu cầu được giao cho mình. Máy chủ kiểm tra đăng nhập và quyền trên từng lệnh; tên người dùng/vai trò gửi kèm từ client không được dùng làm căn cứ phân quyền. Khi tài khoản bị khóa hoặc vai trò bị đổi, thay đổi có hiệu lực ở yêu cầu tiếp theo.
 
 ---
 
@@ -94,6 +94,22 @@ Thay `changeit` bằng mật khẩu riêng và bảo vệ keystore/truststore. N
 
 ### 4.5 Tài khoản mẫu và chuyển đổi dữ liệu cũ
 Tài khoản được tạo bởi `schema.sql` dùng các mật khẩu ở bảng phía trên nhưng cột `password` lưu chuỗi PBKDF2, không lưu mật khẩu gốc. Khi cập nhật ứng dụng trên cơ sở dữ liệu cũ, mỗi tài khoản mật khẩu văn bản sẽ được chuyển sang hash khi người dùng đăng nhập hợp lệ lần đầu; không cần lưu hoặc gửi mật khẩu dạng văn bản trong SQL.
+
+### 4.6 Heartbeat và tự kết nối lại
+- Client gửi heartbeat TCP `PING` mỗi 15 giây; server phản hồi `PONG`. Nếu socket bị mất hoặc không có phản hồi, client tự đăng nhập/kết nối lại bằng thông tin chỉ được giữ tạm trong bộ nhớ của phiên chạy.
+- Client thử lại theo khoảng 1, 2, 4, 8... giây, tối đa 30 giây giữa các lần thử. Khi kết nối lại thành công, client tải lại danh sách yêu cầu, số tin chưa đọc và lịch sử của các cửa sổ chat đang mở.
+- Demo: mở client, dừng server trong chốc lát để thấy tiêu đề báo đang kết nối lại, sau đó khởi động server cùng IP/port và xác nhận client trở lại hoạt động.
+
+### 4.7 Nhật ký kiểm toán, sửa/xóa yêu cầu và SLA
+- Chỉ admin thấy **Quản lý tài khoản**, **Nhật ký kiểm toán**, **Sửa yêu cầu** và **Xóa yêu cầu**. Nhật ký hiển thị tối đa 500 sự kiện gần nhất như đăng nhập, tạo/sửa/xóa yêu cầu, phân công, cập nhật trạng thái, quản lý tài khoản, chat và cảnh báo SLA.
+- Xóa yêu cầu là **xóa mềm**: yêu cầu biến khỏi danh sách làm việc nhưng giữ lịch sử kiểm toán và dữ liệu trò chuyện trong cơ sở dữ liệu. Admin có thể sửa tiêu đề, danh mục, mức ưu tiên và mô tả; đổi mức ưu tiên sẽ tính lại hạn SLA.
+- SLA tính theo lịch thứ Hai–thứ Sáu, 08:00–17:00, chưa loại trừ ngày lễ. Hạn mặc định: Khẩn cấp 4 giờ làm việc; Cao 24; Bình thường 72; Thấp 120. Server cảnh báo trước hạn tối đa 1 giờ làm việc và gửi cảnh báo khi quá hạn; cảnh báo một lần cho mỗi trạng thái/cấu hình SLA.
+- Client không còn thanh tiến độ truyền tệp ở góc dưới bên phải. Tiến độ xử lý yêu cầu vẫn hiển thị trong bảng và chức năng F05.
+
+### 4.8 Ảnh và tệp đính kèm trong F11
+- Trong cửa sổ chat, chọn **Gửi ảnh/tệp** để gửi PNG/JPEG/GIF/WebP, PDF/TXT/DOCX/XLSX hoặc ZIP, tối đa 10 MB mỗi tệp.
+- Server lưu tệp trong `server_storage` với tên lưu trữ ngẫu nhiên, lưu metadata/checksum SHA-256 trong MySQL và chỉ cho người có quyền xem cuộc trò chuyện tải xuống. Người nhận chọn nút **Tải tệp** trong lịch sử chat.
+- Khi dùng MySQL, chạy lại `schema.sql` hoặc khởi động server với tài khoản DB có quyền tạo bảng để tạo các bảng phụ trợ mới. Bản fallback trong bộ nhớ giữ dữ liệu chat/audit trong thời gian server còn chạy; tệp chat vẫn được ghi vào `server_storage`.
 
 #### Cách 1: Chạy trực tiếp từ NetBeans / VS Code / IntelliJ
 - Mở dự án `LapTrinhMang` trong IDE.

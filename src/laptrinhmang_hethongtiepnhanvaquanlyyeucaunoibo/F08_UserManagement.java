@@ -111,6 +111,8 @@ public class F08_UserManagement {
         if (!ok) {
             return Protocol.Packet.error(Protocol.CMD_ADD_USER, "Tên đăng nhập '" + newUser.username + "' đã tồn tại trong cơ sở dữ liệu.");
         }
+        db.recordAuditEvent("USER_CREATED", newUser.username, operator.username,
+                "Tạo tài khoản " + newUser.username + " với vai trò " + newUser.role);
 
         return Protocol.Packet.success(Protocol.CMD_ADD_USER, "Thêm tài khoản thành công: " + newUser.username, null);
     }
@@ -137,6 +139,8 @@ public class F08_UserManagement {
         if (!ok) {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_USER, "Không thể cập nhật người dùng trong CSDL.");
         }
+        db.recordAuditEvent("USER_UPDATED", user.username, operator.username,
+                "Cập nhật thông tin tài khoản/vai trò " + user.role);
 
         return Protocol.Packet.success(Protocol.CMD_UPDATE_USER, "Cập nhật tài khoản '" + user.username + "' thành công.", null);
     }
@@ -177,6 +181,8 @@ public class F08_UserManagement {
         }
 
         String actionText = req.lock ? "Khóa" : "Mở khóa";
+        db.recordAuditEvent(req.lock ? "USER_LOCKED" : "USER_UNLOCKED", req.targetUsername,
+                operator.username, actionText + " tài khoản " + req.targetUsername);
         return Protocol.Packet.success(Protocol.CMD_LOCK_USER, actionText + " tài khoản '" + req.targetUsername + "' thành công.", null);
     }
 }

@@ -50,6 +50,10 @@ public class Models {
         public String detail;
         public int progress; // 0 - 100%
         public String attachmentName; // Tên file đính kèm
+        public String slaDueAt;
+        public boolean deleted;
+        public boolean slaWarningSent;
+        public boolean slaOverdueSent;
 
         public Ticket() {}
 
@@ -76,14 +80,23 @@ public class Models {
         public String ticketId;
         public String message;
         public String timestamp;
+        public long attachmentMessageId;
+        public String attachmentName;
 
         public NotificationMessage() {}
 
         public NotificationMessage(String eventType, String ticketId, String message, String timestamp) {
+            this(eventType, ticketId, message, timestamp, 0, null);
+        }
+
+        public NotificationMessage(String eventType, String ticketId, String message, String timestamp,
+                                   long attachmentMessageId, String attachmentName) {
             this.eventType = eventType;
             this.ticketId = ticketId;
             this.message = message;
             this.timestamp = timestamp;
+            this.attachmentMessageId = attachmentMessageId;
+            this.attachmentName = attachmentName;
         }
     }
 
@@ -116,6 +129,9 @@ public class Models {
         public String ticketId, sender, content, sentAt;
         public long id;
         public boolean read;
+        public String attachmentName;
+        public String attachmentMimeType;
+        public long attachmentSize;
 
         public TicketChatMessage(long id, String ticketId, String sender, String content, String sentAt, boolean read) {
             this.id = id;
@@ -124,6 +140,35 @@ public class Models {
             this.content = content;
             this.sentAt = sentAt;
             this.read = read;
+        }
+    }
+
+    public static class AuditEvent implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public String eventType, entityId, actor, detail, createdAt;
+
+        public AuditEvent(String eventType, String entityId, String actor, String detail, String createdAt) {
+            this.eventType = eventType;
+            this.entityId = entityId;
+            this.actor = actor;
+            this.detail = detail;
+            this.createdAt = createdAt;
+        }
+    }
+
+    public static class ChatAttachment implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public long messageId;
+        public String fileName, mimeType;
+        public long fileSize;
+        public byte[] bytes;
+
+        public ChatAttachment(long messageId, String fileName, String mimeType, long fileSize, byte[] bytes) {
+            this.messageId = messageId;
+            this.fileName = fileName;
+            this.mimeType = mimeType;
+            this.fileSize = fileSize;
+            this.bytes = bytes;
         }
     }
 }
