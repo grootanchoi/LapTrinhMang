@@ -47,7 +47,7 @@ Dự án được xây dựng và chuẩn hóa theo đúng yêu cầu phân tác
 | **user01** | `user123` | Lê Văn Nhân Viên | `requester` | Tạo yêu cầu; chỉ xem, xuất, xem lịch sử và tải tệp của yêu cầu do mình gửi; đánh giá yêu cầu đã hoàn thành của mình |
 | **user02** | `user123` | Phạm Thị Kế Toán | `requester` | Tạo yêu cầu; chỉ xem, xuất, xem lịch sử và tải tệp của yêu cầu do mình gửi; đánh giá yêu cầu đã hoàn thành của mình |
 
-Quản trị viên có thể gán vai trò `requester`, `tech` hoặc `admin` khi thêm tài khoản hoặc chọn **Sửa vai trò** trong F08. Máy chủ kiểm tra đăng nhập và quyền trên từng lệnh; tên người dùng/vai trò gửi kèm từ client không được dùng làm căn cứ phân quyền. Khi tài khoản bị khóa hoặc vai trò bị đổi, thay đổi có hiệu lực ở yêu cầu tiếp theo.
+Quản trị viên có thể gán vai trò `requester`, `tech` hoặc `admin` khi thêm tài khoản hoặc chọn **Sửa vai trò** trong F08. Chỉ admin được phân công kỹ thuật viên (F04); tech chỉ cập nhật tiến độ yêu cầu được giao cho mình. Máy chủ kiểm tra đăng nhập và quyền trên từng lệnh; tên người dùng/vai trò gửi kèm từ client không được dùng làm căn cứ phân quyền. Khi tài khoản bị khóa hoặc vai trò bị đổi, thay đổi có hiệu lực ở yêu cầu tiếp theo.
 
 ---
 

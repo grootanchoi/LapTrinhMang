@@ -250,6 +250,9 @@ public class ClientMainGUI {
     // =========================================================================
     public void showDashboard() {
         if (mainFrame != null) mainFrame.dispose();
+        boolean canManageTickets = "admin".equalsIgnoreCase(currentUser.role)
+                || "tech".equalsIgnoreCase(currentUser.role);
+        boolean canAssignTechnician = "admin".equalsIgnoreCase(currentUser.role);
         mainFrame = new JFrame("WorkDesk | Bàn làm việc - [" + currentUser.displayName + " / " + currentUser.getRoleName() + "]");
         mainFrame.setSize(1180, 720);
         mainFrame.setMinimumSize(new Dimension(900, 600));
@@ -393,6 +396,7 @@ public class ClientMainGUI {
         });
 
         JButton btnAssign = createStyledButton("Phân công KTV (F04)", new Color(13, 110, 253), Color.WHITE, 12);
+        btnAssign.setVisible(canAssignTechnician);
         btnAssign.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) { JOptionPane.showMessageDialog(mainFrame, "Vui lòng chọn một yêu cầu cần phân công."); return; }
@@ -400,6 +404,7 @@ public class ClientMainGUI {
         });
 
         JButton btnUpdateStatus = createStyledButton("Cập nhật tiến độ & trạng thái (F05)", new Color(25, 135, 84), Color.WHITE, 12);
+        btnUpdateStatus.setVisible(canManageTickets);
         btnUpdateStatus.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) { JOptionPane.showMessageDialog(mainFrame, "Vui lòng chọn một yêu cầu cần cập nhật."); return; }
@@ -925,8 +930,8 @@ public class ClientMainGUI {
     // F04: TIẾP NHẬN & PHÂN CÔNG KỸ THUẬT VIÊN + TẢI TỆP ĐÍNH KÈM
     // =========================================================================
     private void showAssignDialog(String ticketId) {
-        if ("requester".equalsIgnoreCase(currentUser.role)) {
-            JOptionPane.showMessageDialog(mainFrame, "Chỉ Quản trị viên hoặc Kỹ thuật viên mới có quyền phân công yêu cầu.");
+        if (!"admin".equalsIgnoreCase(currentUser.role)) {
+            JOptionPane.showMessageDialog(mainFrame, "Chỉ Quản trị viên mới có quyền phân công kỹ thuật viên.");
             return;
         }
 

@@ -67,8 +67,8 @@ public class F04_AssignTechnician {
      */
     public static Protocol.Packet handleServerAssign(Protocol.Packet requestPacket, Models.User user,
                                                       F06_NotificationBroadcaster broadcaster) {
-        if (user == null || !("admin".equalsIgnoreCase(user.role) || "tech".equalsIgnoreCase(user.role))) {
-            return Protocol.Packet.error(Protocol.CMD_ASSIGN_TECH, "Chỉ Quản trị viên hoặc Kỹ thuật viên mới được phân công yêu cầu.");
+        if (user == null || !"admin".equalsIgnoreCase(user.role)) {
+            return Protocol.Packet.error(Protocol.CMD_ASSIGN_TECH, "Chỉ Quản trị viên mới được phân công kỹ thuật viên.");
         }
         if (!(requestPacket.data instanceof AssignRequest req)) {
             return Protocol.Packet.error(Protocol.CMD_ASSIGN_TECH, "Dữ liệu phân công không đúng định dạng.");

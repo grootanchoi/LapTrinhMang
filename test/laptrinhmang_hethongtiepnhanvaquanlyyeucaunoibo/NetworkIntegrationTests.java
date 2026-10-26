@@ -37,10 +37,12 @@ public final class NetworkIntegrationTests {
         try {
             TestClient requester = connect(port, "user02", "user123");
             TestClient technician = connect(port, "tech01", "tech123");
+            TestClient admin = connect(port, "admin", "admin123");
             clients.add(requester);
             clients.add(technician);
+            clients.add(admin);
 
-            testRoleAuthorization(requester, port);
+            testRoleAuthorization(requester, technician, admin);
             testChatReadStatus(db, requester, technician);
             testConcurrentClients(port, requester, technician);
             testDisconnectCleanup(server, clients);
@@ -75,10 +77,27 @@ public final class NetworkIntegrationTests {
         check(db.authenticate(username, "incorrect") == null, "database rejects incorrect password");
     }
 
-    private static void testRoleAuthorization(TestClient requester, int port) throws Exception {
+    private static void testRoleAuthorization(TestClient requester, TestClient technician,
+                                               TestClient admin) throws Exception {
         Protocol.Packet denial = requester.request(new Protocol.Packet(Protocol.CMD_GET_USERS, "", "",
                 new F08_UserManagement.AdminUserRequest("user02", "admin")));
         check(Protocol.STATUS_ERROR.equals(denial.status), "requester cannot forge admin role");
+
+        F04_AssignTechnician.AssignRequest assignment =
+                new F04_AssignTechnician.AssignRequest(TICKET_ID, "tech02", "admin");
+        Protocol.Packet technicianDenial = technician.request(new Protocol.Packet(
+                Protocol.CMD_ASSIGN_TECH, "", "", assignment));
+        check(Protocol.STATUS_ERROR.equals(technicianDenial.status),
+                "technician cannot assign tickets");
+
+        Protocol.Packet adminAssignment = admin.request(new Protocol.Packet(
+                Protocol.CMD_ASSIGN_TECH, "", "", assignment));
+        check(Protocol.STATUS_SUCCESS.equals(adminAssignment.status),
+                "admin can assign tickets to technicians");
+        Protocol.Packet restoreAssignment = admin.request(new Protocol.Packet(Protocol.CMD_ASSIGN_TECH, "", "",
+                new F04_AssignTechnician.AssignRequest(TICKET_ID, "tech01", "admin")));
+        check(Protocol.STATUS_SUCCESS.equals(restoreAssignment.status),
+                "admin can restore the assigned technician test fixture");
     }
 
     private static void testChatReadStatus(DatabaseManager db, TestClient requester,
