@@ -135,7 +135,7 @@ public class ServerMain {
 
             log("Máy chủ TCP đã khởi động thành công trên cổng: " + port);
             log("Chế độ lưu trữ: " + (DatabaseManager.getInstance().isUsingMySQL() ? "MySQL Server (workdesk_db)" : "Local Datastore (Bộ nhớ tích hợp an toàn)"));
-            log("Sẵn sàng lắng nghe kết nối từ các Client (F01, F02, F03, F04, F05, F06, F08)...");
+            log("Sẵn sàng lắng nghe kết nối từ các Client (F01-F11)...");
 
             if (statusLabel != null) {
                 statusLabel.setText("TRẠNG THÁI: ĐANG CHẠY (PORT " + port + ")");
@@ -269,6 +269,18 @@ public class ServerMain {
          * Điều phối gói tin tới đúng module F01, F02, F03, F04, F05, F08
          */
         private Protocol.Packet dispatchCommand(Protocol.Packet packet) {
+            if (!Protocol.CMD_LOGIN.equals(packet.command) && authenticatedUser != null) {
+                Models.User currentUser = DatabaseManager.getInstance().getUserByUsername(authenticatedUser.username);
+                if (currentUser == null || "Đã khóa".equalsIgnoreCase(currentUser.status)) {
+                    authenticatedUser = null;
+                } else {
+                    authenticatedUser = currentUser;
+                }
+            }
+            if (!Protocol.CMD_LOGIN.equals(packet.command) && authenticatedUser == null) {
+                return Protocol.Packet.error(packet.command, "Bạn cần đăng nhập bằng tài khoản đang hoạt động.");
+            }
+
             switch (packet.command) {
                 case Protocol.CMD_LOGIN: {
                     // F01: Đăng nhập & Xác thực
@@ -284,19 +296,19 @@ public class ServerMain {
 
                 case Protocol.CMD_CREATE_TICKET: {
                     // F02: Tạo yêu cầu hỗ trợ kỹ thuật
-                    Protocol.Packet resp = F02_CreateTicket.handleServerCreateTicket(packet, broadcaster);
+                    Protocol.Packet resp = F02_CreateTicket.handleServerCreateTicket(packet, authenticatedUser, broadcaster);
                     log("[F02] " + resp.message);
                     return resp;
                 }
 
                 case Protocol.CMD_GET_TICKETS: {
                     // F03: Xem danh sách yêu cầu
-                    return F03_ViewTickets.handleServerGetTickets(packet);
+                    return F03_ViewTickets.handleServerGetTickets(packet, authenticatedUser);
                 }
 
                 case Protocol.CMD_GET_TICKET_DETAIL: {
                     // F03: Xem chi tiết yêu cầu
-                    return F03_ViewTickets.handleServerGetTicketDetail(packet);
+                    return F03_ViewTickets.handleServerGetTicketDetail(packet, authenticatedUser);
                 }
 
                 case Protocol.CMD_SEARCH_TICKETS: {
@@ -316,48 +328,74 @@ public class ServerMain {
                     return F10_TicketHistoryReview.review((F10_TicketHistoryReview.ReviewRequest) packet.data, authenticatedUser);
                 }
 
+                case Protocol.CMD_GET_TICKET_CHAT: {
+                    return F11_TicketChat.getMessages(packet, authenticatedUser);
+                }
+
+                case Protocol.CMD_SEND_TICKET_CHAT: {
+                    return F11_TicketChat.sendMessage(packet, authenticatedUser, broadcaster);
+                }
+
                 case Protocol.CMD_ASSIGN_TECH: {
                     // F04: Phân công kỹ thuật viên
-                    Protocol.Packet resp = F04_AssignTechnician.handleServerAssign(packet, broadcaster);
+                    if (!isAllowedRole("admin", "tech")) return permissionDenied(packet);
+                    Protocol.Packet resp = F04_AssignTechnician.handleServerAssign(packet, authenticatedUser, broadcaster);
                     log("[F04] " + resp.message);
                     return resp;
                 }
 
                 case Protocol.CMD_DOWNLOAD_FILE: {
                     // F04: Tải file đính kèm
-                    return F04_AssignTechnician.handleServerDownloadFile(packet);
+                    return F04_AssignTechnician.handleServerDownloadFile(packet, authenticatedUser);
                 }
 
                 case Protocol.CMD_UPDATE_STATUS: {
                     // F05: Cập nhật trạng thái xử lý và tiến độ %
-                    Protocol.Packet resp = F05_UpdateProgress.handleServerUpdateProgress(packet, broadcaster);
+                    if (!isAllowedRole("admin", "tech")) return permissionDenied(packet);
+                    Protocol.Packet resp = F05_UpdateProgress.handleServerUpdateProgress(packet, authenticatedUser, broadcaster);
                     log("[F05] " + resp.message);
                     return resp;
                 }
 
                 case Protocol.CMD_GET_USERS: {
                     // F08: Lấy danh sách tài khoản (Admin)
-                    return F08_UserManagement.handleServerGetUsers(packet);
+                    if (!isAllowedRole("admin")) return permissionDenied(packet);
+                    return F08_UserManagement.handleServerGetUsers(packet, authenticatedUser);
                 }
 
                 case Protocol.CMD_ADD_USER: {
                     // F08: Thêm tài khoản mới
+                    if (!isAllowedRole("admin")) return permissionDenied(packet);
                     return F08_UserManagement.handleServerAddUser(packet, this.authenticatedUser);
                 }
 
                 case Protocol.CMD_UPDATE_USER: {
                     // F08: Sửa thông tin tài khoản
+                    if (!isAllowedRole("admin")) return permissionDenied(packet);
                     return F08_UserManagement.handleServerUpdateUser(packet, this.authenticatedUser);
                 }
 
                 case Protocol.CMD_LOCK_USER: {
                     // F08: Khóa / mở khóa tài khoản
+                    if (!isAllowedRole("admin")) return permissionDenied(packet);
                     return F08_UserManagement.handleServerLockUser(packet, this.authenticatedUser);
                 }
 
                 default:
                     return Protocol.Packet.error(packet.command, "Lệnh không được hỗ trợ: " + packet.command);
             }
+        }
+
+        private boolean isAllowedRole(String... allowedRoles) {
+            if (authenticatedUser == null) return false;
+            for (String role : allowedRoles) {
+                if (role.equalsIgnoreCase(authenticatedUser.role)) return true;
+            }
+            return false;
+        }
+
+        private Protocol.Packet permissionDenied(Protocol.Packet packet) {
+            return Protocol.Packet.error(packet.command, "Tài khoản của bạn không có quyền thực hiện chức năng này.");
         }
 
         private void refreshTableSession(boolean isAddOrUpdate) {

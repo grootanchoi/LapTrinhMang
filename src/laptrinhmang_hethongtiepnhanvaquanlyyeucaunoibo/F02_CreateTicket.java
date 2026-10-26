@@ -39,7 +39,11 @@ public class F02_CreateTicket {
     // =========================================================================
     // XỬ LÝ PHÍA SERVER (Server-Side Logic)
     // =========================================================================
-    public static Protocol.Packet handleServerCreateTicket(Protocol.Packet requestPacket, F06_NotificationBroadcaster broadcaster) {
+    public static Protocol.Packet handleServerCreateTicket(Protocol.Packet requestPacket, Models.User user,
+                                                            F06_NotificationBroadcaster broadcaster) {
+        if (user == null) {
+            return Protocol.Packet.error(Protocol.CMD_CREATE_TICKET, "Bạn cần đăng nhập.");
+        }
         if (!(requestPacket.data instanceof CreateTicketRequest req)) {
             return Protocol.Packet.error(Protocol.CMD_CREATE_TICKET, "Dữ liệu yêu cầu không đúng định dạng.");
         }
@@ -51,10 +55,6 @@ public class F02_CreateTicket {
         if (req.detail == null || req.detail.trim().isEmpty()) {
             return Protocol.Packet.error(Protocol.CMD_CREATE_TICKET, "Mô tả chi tiết yêu cầu không được để trống.");
         }
-        if (req.owner == null || req.owner.trim().isEmpty()) {
-            return Protocol.Packet.error(Protocol.CMD_CREATE_TICKET, "Người gửi yêu cầu không xác định.");
-        }
-
         DatabaseManager db = DatabaseManager.getInstance();
 
         // 2. Server tự động sinh mã yêu cầu theo chuẩn
@@ -68,7 +68,7 @@ public class F02_CreateTicket {
                 req.priority != null ? req.priority : "Bình thường",
                 today,
                 "Mới",
-                req.owner,
+                user.username,
                 "Chưa phân công",
                 req.detail.trim(),
                 0,
@@ -82,7 +82,7 @@ public class F02_CreateTicket {
         }
 
         // Ghi lại lịch sử khởi tạo
-        db.recordHistory(newTicketId, "Khởi tạo yêu cầu", req.owner, "Yêu cầu được gửi lên hệ thống");
+        db.recordHistory(newTicketId, "Khởi tạo yêu cầu", user.username, "Yêu cầu được gửi lên hệ thống");
 
         // 4. Phát sinh sự kiện Socket và thông báo tới các Client đang kết nối (F06)
         if (broadcaster != null) {

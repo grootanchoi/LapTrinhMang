@@ -33,14 +33,16 @@ public class F03_ViewTickets {
     // =========================================================================
     // XỬ LÝ PHÍA SERVER (Server-Side Logic)
     // =========================================================================
-    public static Protocol.Packet handleServerGetTickets(Protocol.Packet requestPacket) {
-        if (!(requestPacket.data instanceof ViewTicketsRequest req)) {
+    public static Protocol.Packet handleServerGetTickets(Protocol.Packet requestPacket, Models.User user) {
+        if (user == null) {
+            return Protocol.Packet.error(Protocol.CMD_GET_TICKETS, "Bạn cần đăng nhập.");
+        }
+        if (!(requestPacket.data instanceof ViewTicketsRequest)) {
             return Protocol.Packet.error(Protocol.CMD_GET_TICKETS, "Dữ liệu yêu cầu không hợp lệ.");
         }
 
         DatabaseManager db = DatabaseManager.getInstance();
-        // Server kiểm tra quyền và truy vấn theo tài khoản & vai trò
-        List<Models.Ticket> list = db.getTicketsForUser(req.username, req.role);
+        List<Models.Ticket> list = db.getTicketsForUser(user.username, user.role);
 
         return Protocol.Packet.success(
                 Protocol.CMD_GET_TICKETS,
@@ -49,7 +51,10 @@ public class F03_ViewTickets {
         );
     }
 
-    public static Protocol.Packet handleServerGetTicketDetail(Protocol.Packet requestPacket) {
+    public static Protocol.Packet handleServerGetTicketDetail(Protocol.Packet requestPacket, Models.User user) {
+        if (user == null) {
+            return Protocol.Packet.error(Protocol.CMD_GET_TICKET_DETAIL, "Bạn cần đăng nhập.");
+        }
         if (!(requestPacket.data instanceof String ticketId)) {
             return Protocol.Packet.error(Protocol.CMD_GET_TICKET_DETAIL, "Mã yêu cầu không hợp lệ.");
         }
@@ -58,6 +63,13 @@ public class F03_ViewTickets {
         Models.Ticket t = db.getTicketById(ticketId);
         if (t == null) {
             return Protocol.Packet.error(Protocol.CMD_GET_TICKET_DETAIL, "Không tìm thấy yêu cầu có mã: " + ticketId);
+        }
+        boolean allowed = "admin".equalsIgnoreCase(user.role)
+                || ("requester".equalsIgnoreCase(user.role) && user.username.equalsIgnoreCase(t.owner))
+                || ("tech".equalsIgnoreCase(user.role)
+                    && (user.username.equalsIgnoreCase(t.assignedTech) || "Mới".equalsIgnoreCase(t.status)));
+        if (!allowed) {
+            return Protocol.Packet.error(Protocol.CMD_GET_TICKET_DETAIL, "Bạn không có quyền xem yêu cầu này.");
         }
 
         return Protocol.Packet.success(Protocol.CMD_GET_TICKET_DETAIL, "Tìm thấy chi tiết yêu cầu", t);

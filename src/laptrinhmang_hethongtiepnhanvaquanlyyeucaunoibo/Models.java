@@ -110,4 +110,16 @@ public class Models {
             this.ticketId = ticketId; this.reviewer = reviewer; this.rating = rating; this.comment = comment; this.createdAt = createdAt;
         }
     }
+
+    public static class TicketChatMessage implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public String ticketId, sender, content, sentAt;
+
+        public TicketChatMessage(String ticketId, String sender, String content, String sentAt) {
+            this.ticketId = ticketId;
+            this.sender = sender;
+            this.content = content;
+            this.sentAt = sentAt;
+        }
+    }
 }

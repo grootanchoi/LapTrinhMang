@@ -39,6 +39,9 @@ public class ClientMainGUI {
     private boolean isListening = false;
     private final java.util.Map<String, BlockingQueue<Protocol.Packet>> responseQueues = new ConcurrentHashMap<>();
     private final java.util.Map<String, Object> commandLocks = new ConcurrentHashMap<>();
+    private final java.util.Map<String, JTextArea> openTicketChats = new ConcurrentHashMap<>();
+    private final java.util.Map<String, List<String>> pendingTicketChatMessages = new ConcurrentHashMap<>();
+    private final java.util.Set<String> loadingTicketChats = ConcurrentHashMap.newKeySet();
 
     // Bảng dữ liệu và cache
     private DefaultTableModel ticketTableModel;
@@ -199,11 +202,17 @@ public class ClientMainGUI {
                             // Nhận thông báo phát sóng từ Server (F06)
                             Models.NotificationMessage notif = (Models.NotificationMessage) packet.data;
                             SwingUtilities.invokeLater(() -> {
+                                if ("TICKET_CHAT_MESSAGE".equals(notif.eventType)) {
+                                    appendTicketChatMessage(notif.ticketId, notif.message);
+                                }
                                 // Tự động làm mới danh sách yêu cầu (F03)
                                 requestTicketList();
 
                                 // Hiển thị thông báo
-                                showToastNotification("THÔNG BÁO HỆ THỐNG (" + notif.timestamp + ")\n" + notif.message);
+                                if (!"TICKET_CHAT_MESSAGE".equals(notif.eventType)
+                                        || !openTicketChats.containsKey(notif.ticketId)) {
+                                    showToastNotification("THÔNG BÁO HỆ THỐNG (" + notif.timestamp + ")\n" + notif.message);
+                                }
                             });
                         } else if (Protocol.CMD_GET_TICKETS.equals(packet.command)) {
                             if (Protocol.STATUS_SUCCESS.equals(packet.status) && packet.data instanceof List<?>) {
@@ -400,13 +409,29 @@ public class ClientMainGUI {
                 JOptionPane.showMessageDialog(mainFrame, "Yêu cầu này không có file đính kèm.");
                 return;
             }
-            downloadAttachmentFile(fileName);
+            String ticketId = (String) table.getValueAt(row, 0);
+            downloadAttachmentFile(ticketId, fileName);
+        });
+
+        JButton btnChat = createStyledButton("Trao đổi trực tuyến (F11)", new Color(111, 66, 193), Color.WHITE, 12);
+        btnChat.addActionListener(e -> {
+            int row = table.getSelectedRow();
+            if (row < 0) {
+                JOptionPane.showMessageDialog(mainFrame, "Vui lòng chọn yêu cầu cần trao đổi.");
+                return;
+            }
+            String ticketId = (String) table.getValueAt(row, 0);
+            Models.Ticket ticket = cachedTickets.stream()
+                    .filter(item -> item.id.equals(ticketId))
+                    .findFirst().orElse(null);
+            if (ticket != null) showTicketChatDialog(ticket);
         });
 
         actionButtons.add(btnDetail);
         actionButtons.add(btnAssign);
         actionButtons.add(btnUpdateStatus);
         actionButtons.add(btnDownloadAttach);
+        actionButtons.add(btnChat);
 
         // Thanh tiến độ hiển thị số byte và % (F04, F05)
         JPanel progressPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 5));
@@ -701,6 +726,125 @@ public class ClientMainGUI {
         }, "f10-review").start();
     }
 
+    private void showTicketChatDialog(Models.Ticket ticket) {
+        JTextArea existingChat = openTicketChats.get(ticket.id);
+        if (existingChat != null) {
+            Window window = SwingUtilities.getWindowAncestor(existingChat);
+            if (window != null) window.toFront();
+            return;
+        }
+
+        JDialog dialog = new JDialog(mainFrame, "Trao đổi trực tuyến - " + ticket.id, false);
+        dialog.setSize(620, 480);
+        dialog.setLocationRelativeTo(mainFrame);
+        dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+
+        JTextArea transcript = new JTextArea();
+        transcript.setEditable(false);
+        transcript.setLineWrap(true);
+        transcript.setWrapStyleWord(true);
+        transcript.setText("Đang tải lịch sử trao đổi...\n");
+        openTicketChats.put(ticket.id, transcript);
+        loadingTicketChats.add(ticket.id);
+        dialog.addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowClosed(java.awt.event.WindowEvent e) {
+                openTicketChats.remove(ticket.id, transcript);
+                pendingTicketChatMessages.remove(ticket.id);
+                loadingTicketChats.remove(ticket.id);
+            }
+        });
+
+        JTextField messageInput = new JTextField();
+        JButton sendButton = createStyledButton("Gửi qua TCP", BLUE, Color.WHITE, 12);
+        sendButton.setEnabled(!"Hoàn thành".equalsIgnoreCase(ticket.status)
+                && !"Đã hủy".equalsIgnoreCase(ticket.status));
+        sendButton.addActionListener(e -> {
+            String content = messageInput.getText().trim();
+            if (content.isEmpty()) return;
+            sendButton.setEnabled(false);
+            new Thread(() -> {
+                try {
+                    Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(
+                            Protocol.CMD_SEND_TICKET_CHAT, "", "",
+                            new F11_TicketChat.ChatRequest(ticket.id, content)));
+                    if (!Protocol.STATUS_SUCCESS.equals(response.status)) {
+                        throw new IOException(response.message);
+                    }
+                    SwingUtilities.invokeLater(() -> messageInput.setText(""));
+                } catch (Exception ex) {
+                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(dialog, ex.getMessage(),
+                            "F11 - Trao đổi trực tuyến", JOptionPane.ERROR_MESSAGE));
+                } finally {
+                    SwingUtilities.invokeLater(() -> sendButton.setEnabled(true));
+                }
+            }, "f11-send-chat").start();
+        });
+        messageInput.addActionListener(e -> sendButton.doClick());
+
+        JPanel composer = new JPanel(new BorderLayout(8, 0));
+        composer.setBorder(new EmptyBorder(10, 0, 0, 0));
+        composer.add(messageInput, BorderLayout.CENTER);
+        composer.add(sendButton, BorderLayout.EAST);
+
+        JPanel content = new JPanel(new BorderLayout(8, 8));
+        content.setBorder(new EmptyBorder(12, 12, 12, 12));
+        content.add(new JLabel("Trao đổi giữa người gửi và kỹ thuật viên phụ trách. Tin nhắn được lưu theo yêu cầu."), BorderLayout.NORTH);
+        content.add(new JScrollPane(transcript), BorderLayout.CENTER);
+        content.add(composer, BorderLayout.SOUTH);
+        dialog.setContentPane(content);
+        dialog.setVisible(true);
+
+        new Thread(() -> {
+            try {
+                Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(
+                        Protocol.CMD_GET_TICKET_CHAT, "", "",
+                        new F11_TicketChat.ChatRequest(ticket.id, "")));
+                if (!Protocol.STATUS_SUCCESS.equals(response.status)) throw new IOException(response.message);
+                if (!(response.data instanceof List<?> rows)) throw new IOException("Lịch sử trao đổi nhận được không hợp lệ.");
+                StringBuilder history = new StringBuilder();
+                java.util.Set<String> loadedMessages = new java.util.HashSet<>();
+                for (Object row : rows) {
+                    if (row instanceof Models.TicketChatMessage chatMessage) {
+                        String line = chatMessage.sentAt + " | " + chatMessage.sender
+                                + ": " + chatMessage.content;
+                        history.append(line).append('\n');
+                        loadedMessages.add(line);
+                    }
+                }
+                SwingUtilities.invokeLater(() -> {
+                    transcript.setText("");
+                    transcript.append(history.length() == 0 ? "Chưa có tin nhắn. Hãy bắt đầu trao đổi.\n" : history.toString());
+                    loadingTicketChats.remove(ticket.id);
+                    List<String> pending = pendingTicketChatMessages.remove(ticket.id);
+                    if (pending != null) {
+                        for (String message : pending) {
+                            if (loadedMessages.add(message)) transcript.append(message + "\n");
+                        }
+                    }
+                    transcript.setCaretPosition(transcript.getDocument().getLength());
+                });
+            } catch (Exception ex) {
+                SwingUtilities.invokeLater(() -> {
+                    loadingTicketChats.remove(ticket.id);
+                    transcript.setText("Không thể tải lịch sử: " + ex.getMessage());
+                    sendButton.setEnabled(false);
+                });
+            }
+        }, "f11-load-chat").start();
+    }
+
+    private void appendTicketChatMessage(String ticketId, String message) {
+        if (loadingTicketChats.contains(ticketId)) {
+            pendingTicketChatMessages.computeIfAbsent(ticketId, key -> new ArrayList<>()).add(message);
+            return;
+        }
+        JTextArea transcript = openTicketChats.get(ticketId);
+        if (transcript == null) return;
+        transcript.append(message + "\n");
+        transcript.setCaretPosition(transcript.getDocument().getLength());
+    }
+
     private void exportTicketListToFile() {
         JFileChooser fc = new JFileChooser();
         fc.setSelectedFile(new File("BaoCao_YeuCau_" + System.currentTimeMillis() + ".txt"));
@@ -765,57 +909,39 @@ public class ClientMainGUI {
         d.setVisible(true);
     }
 
-    private void downloadAttachmentFile(String fileName) {
+    private void downloadAttachmentFile(String ticketId, String fileName) {
         fileProgressText.setText("Đang tải file: " + fileName + " qua Socket...");
         fileProgressBar.setValue(20);
 
         new Thread(() -> {
             try {
-                // Yêu cầu server tải file
-                File targetDir = new File("client_downloads");
-                if (!targetDir.exists()) targetDir.mkdirs();
-                File dest = new File(targetDir, fileName);
-
-                // Đầu vào: Tên file
-                F04_AssignTechnician.FileDownloadRequest req = new F04_AssignTechnician.FileDownloadRequest(fileName);
+                F04_AssignTechnician.FileDownloadRequest req =
+                        new F04_AssignTechnician.FileDownloadRequest(fileName, ticketId);
                 Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_DOWNLOAD_FILE, "", "", req);
-
-                // Giả lập stream buffer với tiến độ % và số byte (F04, F05)
-                File source = new File(FileTransferHelper.SERVER_STORAGE_DIR, fileName);
-                if (source.exists()) {
-                    long total = source.length();
-                    byte[] buf = new byte[1024];
-                    try (FileInputStream fis = new FileInputStream(source);
-                         FileOutputStream fos = new FileOutputStream(dest)) {
-                        long transferred = 0;
-                        int read;
-                        while ((read = fis.read(buf)) != -1) {
-                            fos.write(buf, 0, read);
-                            transferred += read;
-                            long finalTrans = transferred;
-                            int pct = (int) ((transferred * 100) / (total > 0 ? total : 1));
-                            SwingUtilities.invokeLater(() -> {
-                                fileProgressBar.setValue(pct);
-                                fileProgressText.setText("Đã tải: " + finalTrans + " / " + total + " bytes (" + pct + "%)");
-                            });
-                            Thread.sleep(20); // Tạo hiệu ứng truyền byte thực tế
-                        }
-                    }
-                    SwingUtilities.invokeLater(() -> {
-                        fileProgressText.setText("Tải thành công: " + dest.length() + " bytes (100%)");
-                        JOptionPane.showMessageDialog(mainFrame,
-                                "Tệp đính kèm đã tải thành công!\n- Tên file: " + fileName + "\n- Lưu tại: " + dest.getAbsolutePath() + "\n- Kích thước: " + dest.length() + " bytes",
-                                "F04 - Tải file hoàn tất", JOptionPane.INFORMATION_MESSAGE);
-                    });
-                } else {
-                    SwingUtilities.invokeLater(() -> {
-                        fileProgressText.setText("Tải hoàn tất.");
-                        fileProgressBar.setValue(100);
-                        JOptionPane.showMessageDialog(mainFrame, "Đã lưu tệp vào client_downloads/" + fileName);
-                    });
+                Protocol.Packet response = sendAndReceiveSync(packet);
+                if (!Protocol.STATUS_SUCCESS.equals(response.status)) {
+                    throw new IOException(response.message);
                 }
+                if (!(response.data instanceof F04_AssignTechnician.FileDownloadResponse fileResponse)) {
+                    throw new IOException("Dữ liệu file nhận từ Server không hợp lệ.");
+                }
+
+                File targetDir = new File("client_downloads");
+                java.nio.file.Files.createDirectories(targetDir.toPath());
+                File dest = new File(targetDir, fileResponse.fileName);
+                java.nio.file.Files.write(dest.toPath(), fileResponse.fileBytes);
+                SwingUtilities.invokeLater(() -> {
+                    fileProgressText.setText("Tải thành công: " + fileResponse.fileSize + " bytes (100%)");
+                    fileProgressBar.setValue(100);
+                    JOptionPane.showMessageDialog(mainFrame,
+                            "Tệp đính kèm đã tải thành công!\n- Tên file: " + fileResponse.fileName + "\n- Lưu tại: " + dest.getAbsolutePath() + "\n- Kích thước: " + fileResponse.fileSize + " bytes",
+                            "F04 - Tải file hoàn tất", JOptionPane.INFORMATION_MESSAGE);
+                });
             } catch (Exception ex) {
-                SwingUtilities.invokeLater(() -> fileProgressText.setText("Lỗi tải file: " + ex.getMessage()));
+                SwingUtilities.invokeLater(() -> {
+                    fileProgressText.setText("Lỗi tải file: " + ex.getMessage());
+                    JOptionPane.showMessageDialog(mainFrame, ex.getMessage(), "F04 - Lỗi tải file", JOptionPane.ERROR_MESSAGE);
+                });
             }
         }).start();
     }

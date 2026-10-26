@@ -77,12 +77,18 @@ public class F06_NotificationBroadcaster {
      * Gửi thông báo đích danh tới một người dùng cụ thể
      */
     public void sendToUser(String targetUsername, String eventType, String ticketId, String message) {
+        sendToUsers(targetUsername == null ? List.of() : List.of(targetUsername), eventType, ticketId, message);
+    }
+
+    public void sendToUsers(List<String> targetUsernames, String eventType, String ticketId, String message) {
         String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss dd/MM"));
         Models.NotificationMessage notif = new Models.NotificationMessage(eventType, ticketId, message, timestamp);
         Protocol.Packet notifPacket = new Protocol.Packet(Protocol.CMD_NOTIFICATION, Protocol.STATUS_SUCCESS, message, notif);
 
         for (ClientSessionHolder session : activeSessions) {
-            if (targetUsername != null && targetUsername.equalsIgnoreCase(session.getUsername())) {
+            boolean isTarget = targetUsernames.stream().anyMatch(username ->
+                    username != null && username.equalsIgnoreCase(session.getUsername()));
+            if (isTarget) {
                 try {
                     if (session.isConnected()) {
                         ObjectOutputStream out = session.getOutputStream();
@@ -92,7 +98,9 @@ public class F06_NotificationBroadcaster {
                             out.reset();
                         }
                     }
-                } catch (IOException ignored) {}
+                } catch (IOException e) {
+                    System.err.println("[F06] Lỗi gửi thông báo tới phiên " + session.getSessionId() + ": " + e.getMessage());
+                }
             }
         }
     }

@@ -61,7 +61,11 @@ public class F05_UpdateProgress {
     // =========================================================================
     // XỬ LÝ PHÍA SERVER (Server-Side Logic)
     // =========================================================================
-    public static Protocol.Packet handleServerUpdateProgress(Protocol.Packet requestPacket, F06_NotificationBroadcaster broadcaster) {
+    public static Protocol.Packet handleServerUpdateProgress(Protocol.Packet requestPacket, Models.User user,
+                                                              F06_NotificationBroadcaster broadcaster) {
+        if (user == null || !("admin".equalsIgnoreCase(user.role) || "tech".equalsIgnoreCase(user.role))) {
+            return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Chỉ Kỹ thuật viên hoặc Quản trị viên mới được cập nhật tiến độ.");
+        }
         if (!(requestPacket.data instanceof UpdateProgressRequest req)) {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Dữ liệu cập nhật tiến độ không đúng định dạng.");
         }
@@ -77,9 +81,15 @@ public class F05_UpdateProgress {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Không tìm thấy yêu cầu: " + req.ticketId);
         }
 
-        // 2. Xác thực quyền: Chỉ kỹ thuật viên phụ trách hoặc admin mới được cập nhật
-        boolean isAssignedTech = req.updatedBy != null && req.updatedBy.equalsIgnoreCase(t.assignedTech);
-        // (Server chấp nhận nếu là admin hoặc tech được phân công)
+        if ("tech".equalsIgnoreCase(user.role) && !user.username.equalsIgnoreCase(t.assignedTech)) {
+            return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Chỉ kỹ thuật viên được phân công mới được cập nhật yêu cầu này.");
+        }
+        if (req.resultFileBytes != null && req.resultFileBytes.length > 0
+                && (req.resultFileName == null || req.resultFileName.trim().isEmpty()
+                    || req.resultFileName.contains("/") || req.resultFileName.contains("\\")
+                    || req.resultFileName.equals(".") || req.resultFileName.equals(".."))) {
+            return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Tên tệp kết quả không hợp lệ.");
+        }
 
         long bytesReceived = 0;
         // 3. Xử lý tệp đính kèm kết quả nếu có (Ghi nhận số byte)
@@ -103,7 +113,7 @@ public class F05_UpdateProgress {
         }
 
         // 5. Cập nhật vào CSDL MySQL / Datastore và lưu lịch sử
-        boolean ok = db.updateTicketStatus(req.ticketId, effectiveStatus, req.progressPercent, req.note, req.updatedBy);
+        boolean ok = db.updateTicketStatus(req.ticketId, effectiveStatus, req.progressPercent, req.note, user.username);
         if (!ok) {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Lỗi cập nhật CSDL MySQL.");
         }

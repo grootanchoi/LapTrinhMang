@@ -25,6 +25,7 @@ public class DatabaseManager {
     // Local Datastore fallback
     private final Map<String, Models.User> localUsers = new ConcurrentHashMap<>();
     private final Map<String, Models.Ticket> localTickets = new ConcurrentHashMap<>();
+    private final Map<String, List<Models.TicketChatMessage>> localTicketChat = new ConcurrentHashMap<>();
     private int ticketSequence = 2;
 
     private DatabaseManager() {
@@ -65,6 +66,7 @@ public class DatabaseManager {
             try (Connection conn = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
                 if (conn != null && !conn.isClosed()) {
                     migrateUserStatusColumn(conn);
+                    ensureTicketChatTable(conn);
                     useMySQL = true;
                     System.out.println("[DatabaseManager] Kết nối MySQL thành công! Sử dụng CSDL: workdesk_db");
                 }
@@ -80,6 +82,22 @@ public class DatabaseManager {
         try (Statement st = conn.createStatement()) {
             st.executeUpdate("ALTER TABLE users MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'Đang hoạt động'");
             st.executeUpdate("UPDATE users SET status = 'Đang hoạt động' WHERE status IS NULL OR status = ''");
+        }
+    }
+
+    private void ensureTicketChatTable(Connection conn) throws SQLException {
+        String sql = "CREATE TABLE IF NOT EXISTS ticket_messages ("
+                + "id BIGINT AUTO_INCREMENT PRIMARY KEY, "
+                + "ticket_id VARCHAR(30) NOT NULL, "
+                + "sender VARCHAR(50) NOT NULL, "
+                + "content VARCHAR(2000) NOT NULL, "
+                + "sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                + "INDEX idx_ticket_messages_ticket_sent (ticket_id, sent_at, id), "
+                + "FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE, "
+                + "FOREIGN KEY (sender) REFERENCES users(username)) "
+                + "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+        try (Statement st = conn.createStatement()) {
+            st.executeUpdate(sql);
         }
     }
 
@@ -120,6 +138,28 @@ public class DatabaseManager {
             return u;
         }
         return null;
+    }
+
+    public Models.User getUserByUsername(String username) {
+        if (username == null || username.trim().isEmpty()) return null;
+        if (useMySQL) {
+            String sql = "SELECT username, display_name, role, status FROM users WHERE username = ?";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, username);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        return new Models.User(rs.getString("username"), "", rs.getString("display_name"),
+                                rs.getString("role"), rs.getString("status"));
+                    }
+                    return null;
+                }
+            } catch (SQLException e) {
+                System.err.println("[DatabaseManager] Lỗi kiểm tra tài khoản: " + e.getMessage());
+                return null;
+            }
+        }
+        Models.User user = localUsers.get(username);
+        return user == null ? null : new Models.User(user.username, "", user.displayName, user.role, user.status);
     }
 
     // ==================== F02: TẠO YÊU CẦU ====================
@@ -364,6 +404,55 @@ public class DatabaseManager {
             } catch (SQLException ignored) {}
         }
         return localTickets.get(id);
+    }
+
+    public synchronized List<Models.TicketChatMessage> getTicketChatMessages(String ticketId) {
+        List<Models.TicketChatMessage> messages = new ArrayList<>();
+        if (useMySQL) {
+            String sql = "SELECT ticket_id, sender, content, "
+                    + "DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at "
+                    + "FROM ticket_messages WHERE ticket_id = ? ORDER BY id ASC";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, ticketId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        messages.add(new Models.TicketChatMessage(rs.getString("ticket_id"),
+                                rs.getString("sender"), rs.getString("content"), rs.getString("sent_at")));
+                    }
+                }
+            } catch (SQLException e) {
+                System.err.println("[F11] Lỗi tải lịch sử trao đổi: " + e.getMessage());
+                return messages;
+            }
+            return messages;
+        }
+        List<Models.TicketChatMessage> localMessages = localTicketChat.get(ticketId);
+        if (localMessages != null) messages.addAll(localMessages);
+        return messages;
+    }
+
+    public synchronized Models.TicketChatMessage addTicketChatMessage(String ticketId, String sender, String content) {
+        String sentAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        if (useMySQL) {
+            String sql = "INSERT INTO ticket_messages (ticket_id, sender, content) VALUES (?, ?, ?)";
+            try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, ticketId);
+                ps.setString(2, sender);
+                ps.setString(3, content);
+                if (ps.executeUpdate() > 0) {
+                    List<Models.TicketChatMessage> messages = getTicketChatMessages(ticketId);
+                    if (!messages.isEmpty()) return messages.get(messages.size() - 1);
+                }
+            } catch (SQLException e) {
+                System.err.println("[F11] Lỗi lưu tin nhắn trao đổi: " + e.getMessage());
+                return null;
+            }
+            return null;
+        }
+        if (!localTickets.containsKey(ticketId) || !localUsers.containsKey(sender)) return null;
+        Models.TicketChatMessage message = new Models.TicketChatMessage(ticketId, sender, content, sentAt);
+        localTicketChat.computeIfAbsent(ticketId, key -> new ArrayList<>()).add(message);
+        return message;
     }
 
     // ==================== F04: PHÂN CÔNG KỸ THUẬT VIÊN ====================

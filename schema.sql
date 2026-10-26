@@ -55,11 +55,24 @@ CREATE TABLE IF NOT EXISTS `ticket_reviews` (
     CONSTRAINT `chk_review_rating` CHECK (`rating` BETWEEN 1 AND 5)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- F11: Tin nhắn trao đổi trực tuyến theo từng yêu cầu
+CREATE TABLE IF NOT EXISTS `ticket_messages` (
+    `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `ticket_id` VARCHAR(30) NOT NULL,
+    `sender` VARCHAR(50) NOT NULL,
+    `content` VARCHAR(2000) NOT NULL,
+    `sent_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_ticket_messages_ticket_sent` (`ticket_id`, `sent_at`, `id`),
+    CONSTRAINT `fk_message_ticket` FOREIGN KEY (`ticket_id`) REFERENCES `tickets`(`id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_message_sender` FOREIGN KEY (`sender`) REFERENCES `users`(`username`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Chuẩn hóa dữ liệu cũ khi chạy lại script; tránh cột cũ còn charset khác.
 ALTER TABLE `users` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ALTER TABLE `tickets` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ALTER TABLE `ticket_history` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ALTER TABLE `ticket_reviews` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+ALTER TABLE `ticket_messages` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- Thêm tài khoản mẫu ban đầu:
 -- Admin: admin / admin123

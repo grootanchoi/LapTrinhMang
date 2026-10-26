@@ -1,7 +1,7 @@
 # HỆ THỐNG TIẾP NHẬN VÀ QUẢN LÝ YÊU CẦU NỘI BỘ (WORKDESK)
 ## ĐỒ ÁN LẬP TRÌNH MẠNG MÁY TÍNH - MÔ HÌNH CLIENT/SERVER TCP SOCKET
 
-Dự án được xây dựng và chuẩn hóa theo đúng yêu cầu phân tách từng file độc lập cho từng chức năng **F01-F10** (bao gồm các chức năng đã đăng ký) dựa trên nền tảng TCP Socket, cơ sở dữ liệu MySQL và kiến trúc đa luồng (Multi-threading).
+Dự án được xây dựng và chuẩn hóa theo đúng yêu cầu phân tách từng file độc lập cho từng chức năng **F01-F11** (bao gồm các chức năng đã đăng ký và trao đổi hỗ trợ trực tuyến) dựa trên nền tảng TCP Socket, cơ sở dữ liệu MySQL và kiến trúc đa luồng (Multi-threading).
 
 ---
 
@@ -19,6 +19,7 @@ Dự án được xây dựng và chuẩn hóa theo đúng yêu cầu phân tác
 | **F08** | `F08_UserManagement.java` | Server xác thực quyền Admin, kiểm tra dữ liệu và thực hiện Thêm, Sửa vai trò hoặc Khóa tài khoản người dùng trong MySQL. | Dữ liệu tài khoản / Trạng thái CSDL |
 | **F09** | `F09_TicketStatistics.java` | Thống kê số yêu cầu theo trạng thái và kỹ thuật viên bằng `COUNT` và `GROUP BY`; hỗ trợ lọc khoảng ngày và giới hạn theo quyền người dùng. | Vai trò, từ ngày, đến ngày / Bảng thống kê |
 | **F10** | `F10_TicketHistoryReview.java` | Tra cứu lịch sử theo mã yêu cầu; người gửi có thể chấm điểm 1-5 và nhận xét khi yêu cầu hoàn thành. | Mã yêu cầu, điểm, nhận xét / Timeline và kết quả lưu |
+| **F11** | `F11_TicketChat.java` | Trao đổi trực tuyến theo từng yêu cầu. Server xác thực người tham gia, lưu lịch sử và đẩy tin nhắn qua TCP tới người gửi/kỹ thuật viên đang kết nối. | Mã yêu cầu, nội dung / Lịch sử chat và thông báo thời gian thực |
 
 ---
 
@@ -28,11 +29,11 @@ Dự án được xây dựng và chuẩn hóa theo đúng yêu cầu phân tác
   - Khởi chạy cả Server và Client cùng lúc (Rất tiện lợi cho giảng viên / chấm điểm).
   - Hoặc khởi chạy độc lập từng máy chủ (Server) hoặc máy trạm (Client).
 - **`ServerMain.java`**: Máy chủ TCP Server đa luồng (ThreadPool), có GUI Control Panel hiển thị danh sách các phiên Socket kết nối (F06) và Log sự kiện thời gian thực.
-- **`ClientMainGUI.java`**: Giao diện Client tích hợp F01-F10: tìm kiếm và bộ lọc Socket (F07), thống kê (F09), lịch sử và đánh giá (F10), cùng các màn hình F01-F06 và F08.
+- **`ClientMainGUI.java`**: Giao diện Client tích hợp F01-F11: tìm kiếm và bộ lọc Socket (F07), thống kê (F09), lịch sử và đánh giá (F10), chat thời gian thực theo yêu cầu (F11).
 - **`DatabaseManager.java`**: Quản lý kết nối MySQL (`workdesk_db`). Đặc biệt có cơ chế **tự động fallback sang Datastore tích hợp an toàn** nếu máy chấm thi chưa bật service MySQL, đảm bảo ứng dụng chạy 100% không bao giờ gặp lỗi thiếu DB.
 - **`FileTransferHelper.java`**: Module chia nhỏ luồng byte (chunking) và báo cáo tiến độ số byte / % truyền tải qua Socket.
 - **`Protocol.java`**: Định nghĩa giao thức gói tin mạng tuần tự hóa (`Protocol.Packet`).
-- **`schema.sql`**: Script tạo Database, bảng `users`, `tickets`, `ticket_history`, `ticket_reviews` và dữ liệu mẫu trong MySQL.
+- **`schema.sql`**: Script tạo Database, bảng `users`, `tickets`, `ticket_history`, `ticket_reviews`, `ticket_messages` và dữ liệu mẫu trong MySQL.
 
 ---
 
@@ -40,15 +41,24 @@ Dự án được xây dựng và chuẩn hóa theo đúng yêu cầu phân tác
 
 | Tên đăng nhập | Mật khẩu | Họ và tên | Vai trò (Role) | Chức năng có thể thao tác |
 |---|---|---|---|---|
-| **admin** | `admin123` | Quản trị viên hệ thống | `admin` | Toàn quyền: F01, F02, F03, F04, F05, F06, F08 |
-| **tech01** | `tech123` | Nguyễn Văn Kỹ Thuật | `tech` | F01, F02, F03, Tiếp nhận F04, Cập nhật tiến độ F05, Nhận thông báo F06 |
-| **tech02** | `tech123` | Trần Thị Support | `tech` | F01, F02, F03, Tiếp nhận F04, Cập nhật tiến độ F05, Nhận thông báo F06 |
-| **user01** | `user123` | Lê Văn Nhân Viên | `requester` | F01, Tạo yêu cầu F02, Xem yêu cầu của mình & xuất file F03, Nhận thông báo F06 |
-| **user02** | `user123` | Phạm Thị Kế Toán | `requester` | F01, Tạo yêu cầu F02, Xem yêu cầu của mình & xuất file F03, Nhận thông báo F06 |
+| **admin** | `admin123` | Quản trị viên hệ thống | `admin` | Quản lý người dùng và vai trò F08; xem mọi yêu cầu, thống kê, lịch sử; phân công, cập nhật; các chức năng còn lại |
+| **tech01** | `tech123` | Nguyễn Văn Kỹ Thuật | `tech` | Tạo yêu cầu; xem yêu cầu mới và được phân công; phân công kỹ thuật viên; cập nhật yêu cầu được phân công; thống kê, lịch sử và tệp của yêu cầu được phép xem |
+| **tech02** | `tech123` | Trần Thị Support | `tech` | Tạo yêu cầu; xem yêu cầu mới và được phân công; phân công kỹ thuật viên; cập nhật yêu cầu được phân công; thống kê, lịch sử và tệp của yêu cầu được phép xem |
+| **user01** | `user123` | Lê Văn Nhân Viên | `requester` | Tạo yêu cầu; chỉ xem, xuất, xem lịch sử và tải tệp của yêu cầu do mình gửi; đánh giá yêu cầu đã hoàn thành của mình |
+| **user02** | `user123` | Phạm Thị Kế Toán | `requester` | Tạo yêu cầu; chỉ xem, xuất, xem lịch sử và tải tệp của yêu cầu do mình gửi; đánh giá yêu cầu đã hoàn thành của mình |
+
+Quản trị viên có thể gán vai trò `requester`, `tech` hoặc `admin` khi thêm tài khoản hoặc chọn **Sửa vai trò** trong F08. Máy chủ kiểm tra đăng nhập và quyền trên từng lệnh; tên người dùng/vai trò gửi kèm từ client không được dùng làm căn cứ phân quyền. Khi tài khoản bị khóa hoặc vai trò bị đổi, thay đổi có hiệu lực ở yêu cầu tiếp theo.
 
 ---
 
 ### 4. Cách chạy chương trình
+
+### 4.1 Kịch bản demo điểm nhấn mạng (F11)
+1. Khởi động Server và mở hai Client độc lập, đăng nhập lần lượt bằng **user02** và **tech01**.
+2. Chọn yêu cầu mẫu **YC-2026-0001** ở cả hai Client; mở **Trao đổi trực tuyến (F11)**.
+3. Gửi tin nhắn từ một Client và xác nhận tin xuất hiện tức thời ở Client còn lại mà không cần tải lại màn hình.
+4. Đóng cửa sổ chat, mở lại để kiểm tra lịch sử được lưu; đăng nhập bằng **user01** để xác nhận không thể xem cuộc trao đổi của yêu cầu user02.
+5. Nếu dùng MySQL, chạy lại `schema.sql` để tạo bảng `ticket_messages`; ứng dụng cũng tự tạo bảng này khi khởi động nếu tài khoản DB có quyền DDL. Khi không có MySQL, tin nhắn chỉ được giữ trong datastore bộ nhớ của phiên chạy hiện tại.
 
 #### Cách 1: Chạy trực tiếp từ NetBeans / VS Code / IntelliJ
 - Mở dự án `LapTrinhMang` trong IDE.

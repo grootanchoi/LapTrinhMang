@@ -37,6 +37,7 @@ public class F10_TicketHistoryReview {
 
     private static boolean canView(Models.Ticket t, Models.User u) {
         return u != null && ("admin".equalsIgnoreCase(u.role) || u.username.equalsIgnoreCase(t.owner)
-                || u.username.equalsIgnoreCase(t.assignedTech));
+                || u.username.equalsIgnoreCase(t.assignedTech)
+                || ("tech".equalsIgnoreCase(u.role) && "Mới".equalsIgnoreCase(t.status)));
     }
 }

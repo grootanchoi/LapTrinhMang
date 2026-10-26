@@ -51,13 +51,12 @@ public class F08_UserManagement {
     /**
      * Lấy danh sách toàn bộ tài khoản (Xác thực quyền Admin)
      */
-    public static Protocol.Packet handleServerGetUsers(Protocol.Packet requestPacket) {
-        if (!(requestPacket.data instanceof AdminUserRequest req)) {
-            return Protocol.Packet.error(Protocol.CMD_GET_USERS, "Yêu cầu không hợp lệ.");
+    public static Protocol.Packet handleServerGetUsers(Protocol.Packet requestPacket, Models.User operator) {
+        if (operator == null || !"admin".equalsIgnoreCase(operator.role)) {
+            return Protocol.Packet.error(Protocol.CMD_GET_USERS, "Từ chối truy cập: Chỉ Quản trị viên mới có quyền xem danh sách người dùng.");
         }
-
-        if (!"admin".equalsIgnoreCase(req.requestingRole)) {
-            return Protocol.Packet.error(Protocol.CMD_GET_USERS, "Từ chối truy cập: Bạn không có quyền Quản trị viên.");
+        if (!(requestPacket.data instanceof AdminUserRequest)) {
+            return Protocol.Packet.error(Protocol.CMD_GET_USERS, "Yêu cầu không hợp lệ.");
         }
 
         DatabaseManager db = DatabaseManager.getInstance();
@@ -93,6 +92,12 @@ public class F08_UserManagement {
         if (newUser.displayName == null || newUser.displayName.trim().isEmpty()) {
             return Protocol.Packet.error(Protocol.CMD_ADD_USER, "Họ và tên không được để trống.");
         }
+        if (!isValidRole(newUser.role)) {
+            return Protocol.Packet.error(Protocol.CMD_ADD_USER, "Vai trò người dùng không hợp lệ.");
+        }
+        if (!isValidStatus(newUser.status)) {
+            return Protocol.Packet.error(Protocol.CMD_ADD_USER, "Trạng thái tài khoản không hợp lệ.");
+        }
 
         DatabaseManager db = DatabaseManager.getInstance();
         boolean ok;
@@ -121,6 +126,11 @@ public class F08_UserManagement {
         if (!(requestPacket.data instanceof Models.User user)) {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_USER, "Dữ liệu người dùng không hợp lệ.");
         }
+        if (user.username == null || user.username.trim().isEmpty()
+                || user.displayName == null || user.displayName.trim().isEmpty()
+                || !isValidRole(user.role) || !isValidStatus(user.status)) {
+            return Protocol.Packet.error(Protocol.CMD_UPDATE_USER, "Tên, họ tên, vai trò hoặc trạng thái không hợp lệ.");
+        }
 
         DatabaseManager db = DatabaseManager.getInstance();
         boolean ok = db.updateUser(user);
@@ -129,6 +139,15 @@ public class F08_UserManagement {
         }
 
         return Protocol.Packet.success(Protocol.CMD_UPDATE_USER, "Cập nhật tài khoản '" + user.username + "' thành công.", null);
+    }
+
+    private static boolean isValidRole(String role) {
+        return "admin".equalsIgnoreCase(role) || "tech".equalsIgnoreCase(role)
+                || "requester".equalsIgnoreCase(role);
+    }
+
+    private static boolean isValidStatus(String status) {
+        return "Đang hoạt động".equalsIgnoreCase(status) || "Đã khóa".equalsIgnoreCase(status);
     }
 
     /**
@@ -141,6 +160,9 @@ public class F08_UserManagement {
 
         if (!(requestPacket.data instanceof LockUserRequest req)) {
             return Protocol.Packet.error(Protocol.CMD_LOCK_USER, "Yêu cầu khóa không hợp lệ.");
+        }
+        if (req.targetUsername == null || req.targetUsername.trim().isEmpty()) {
+            return Protocol.Packet.error(Protocol.CMD_LOCK_USER, "Tên tài khoản cần đổi trạng thái không hợp lệ.");
         }
 
         // Không cho phép Quản trị viên tự khóa tài khoản của chính mình

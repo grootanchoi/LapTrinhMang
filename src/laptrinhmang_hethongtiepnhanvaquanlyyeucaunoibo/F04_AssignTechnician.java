@@ -34,10 +34,11 @@ public class F04_AssignTechnician {
      */
     public static class FileDownloadRequest implements Serializable {
         private static final long serialVersionUID = 1L;
-        public String fileName;
+        public String fileName, ticketId;
 
-        public FileDownloadRequest(String fileName) {
+        public FileDownloadRequest(String fileName, String ticketId) {
             this.fileName = fileName;
+            this.ticketId = ticketId;
         }
     }
 
@@ -64,7 +65,11 @@ public class F04_AssignTechnician {
     /**
      * Tiếp nhận và phân công kỹ thuật viên
      */
-    public static Protocol.Packet handleServerAssign(Protocol.Packet requestPacket, F06_NotificationBroadcaster broadcaster) {
+    public static Protocol.Packet handleServerAssign(Protocol.Packet requestPacket, Models.User user,
+                                                      F06_NotificationBroadcaster broadcaster) {
+        if (user == null || !("admin".equalsIgnoreCase(user.role) || "tech".equalsIgnoreCase(user.role))) {
+            return Protocol.Packet.error(Protocol.CMD_ASSIGN_TECH, "Chỉ Quản trị viên hoặc Kỹ thuật viên mới được phân công yêu cầu.");
+        }
         if (!(requestPacket.data instanceof AssignRequest req)) {
             return Protocol.Packet.error(Protocol.CMD_ASSIGN_TECH, "Dữ liệu phân công không đúng định dạng.");
         }
@@ -78,9 +83,16 @@ public class F04_AssignTechnician {
         if ("Hoàn thành".equalsIgnoreCase(t.status) || "Đã hủy".equalsIgnoreCase(t.status)) {
             return Protocol.Packet.error(Protocol.CMD_ASSIGN_TECH, "Không thể phân công yêu cầu đã đóng hoặc đã hủy.");
         }
+        boolean isTechnician = DatabaseManager.getInstance().getAllUsers().stream()
+                .anyMatch(candidate -> candidate.username.equalsIgnoreCase(req.techUsername)
+                        && "tech".equalsIgnoreCase(candidate.role)
+                        && !"Đã khóa".equalsIgnoreCase(candidate.status));
+        if (!isTechnician) {
+            return Protocol.Packet.error(Protocol.CMD_ASSIGN_TECH, "Chỉ có thể phân công cho tài khoản kỹ thuật viên đang hoạt động.");
+        }
 
         // Lưu thông tin phân công vào CSDL
-        boolean ok = db.assignTechnician(req.ticketId, req.techUsername, req.assignedBy);
+        boolean ok = db.assignTechnician(req.ticketId, req.techUsername, user.username);
         if (!ok) {
             return Protocol.Packet.error(Protocol.CMD_ASSIGN_TECH, "Lỗi khi cập nhật phân công trong CSDL.");
         }
@@ -97,14 +109,27 @@ public class F04_AssignTechnician {
     /**
      * Xử lý tải file đính kèm qua Socket (Đầu vào: Tên file -> Đầu ra: Tệp dữ liệu đã tải)
      */
-    public static Protocol.Packet handleServerDownloadFile(Protocol.Packet requestPacket) {
+    public static Protocol.Packet handleServerDownloadFile(Protocol.Packet requestPacket, Models.User user) {
+        if (user == null) {
+            return Protocol.Packet.error(Protocol.CMD_DOWNLOAD_FILE, "Bạn cần đăng nhập.");
+        }
         if (!(requestPacket.data instanceof FileDownloadRequest req)) {
             return Protocol.Packet.error(Protocol.CMD_DOWNLOAD_FILE, "Yêu cầu tải file không hợp lệ.");
         }
 
         String fileName = req.fileName;
-        if (fileName == null || fileName.trim().isEmpty()) {
-            return Protocol.Packet.error(Protocol.CMD_DOWNLOAD_FILE, "Tên file không được để trống.");
+        if (fileName == null || fileName.trim().isEmpty() || fileName.contains("/")
+                || fileName.contains("\\") || fileName.equals(".") || fileName.equals("..")) {
+            return Protocol.Packet.error(Protocol.CMD_DOWNLOAD_FILE, "Tên file không hợp lệ.");
+        }
+
+        Models.Ticket ticket = DatabaseManager.getInstance().getTicketById(req.ticketId);
+        boolean canViewTicket = ticket != null && ("admin".equalsIgnoreCase(user.role)
+                || ("requester".equalsIgnoreCase(user.role) && user.username.equalsIgnoreCase(ticket.owner))
+                || ("tech".equalsIgnoreCase(user.role)
+                    && (user.username.equalsIgnoreCase(ticket.assignedTech) || "Mới".equalsIgnoreCase(ticket.status))));
+        if (!canViewTicket || !fileName.equals(ticket.attachmentName)) {
+            return Protocol.Packet.error(Protocol.CMD_DOWNLOAD_FILE, "Bạn không có quyền tải tệp của yêu cầu này.");
         }
 
         File target = new File(FileTransferHelper.SERVER_STORAGE_DIR, fileName);
