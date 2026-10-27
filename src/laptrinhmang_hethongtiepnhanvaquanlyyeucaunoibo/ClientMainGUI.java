@@ -43,8 +43,7 @@ public class ClientMainGUI {
     private java.util.concurrent.ScheduledExecutorService heartbeatExecutor;
     private final java.util.Map<String, BlockingQueue<Protocol.Packet>> responseQueues = new ConcurrentHashMap<>();
     private final java.util.Map<String, Object> commandLocks = new ConcurrentHashMap<>();
-    private final java.util.Map<String, JTextArea> openTicketChats = new ConcurrentHashMap<>();
-    private final java.util.Map<String, JPanel> openTicketChatAttachments = new ConcurrentHashMap<>();
+    private final java.util.Map<String, JPanel> openTicketChats = new ConcurrentHashMap<>();
     private final java.util.Map<String, List<PendingChatEvent>> pendingTicketChatMessages = new ConcurrentHashMap<>();
     private final java.util.Set<String> loadingTicketChats = ConcurrentHashMap.newKeySet();
     private final java.util.Map<String, Integer> unreadChatCounts = new ConcurrentHashMap<>();
@@ -348,17 +347,14 @@ public class ClientMainGUI {
                             .filter(Models.TicketChatMessage.class::isInstance)
                             .map(Models.TicketChatMessage.class::cast).toList();
                     SwingUtilities.invokeLater(() -> {
-                        JTextArea transcript = openTicketChats.get(ticketId);
-                        JPanel attachments = openTicketChatAttachments.get(ticketId);
-                        if (transcript == null || attachments == null) return;
-                        transcript.setText("");
-                        attachments.removeAll();
+                        JPanel transcript = openTicketChats.get(ticketId);
+                        if (transcript == null) return;
+                        transcript.removeAll();
                         for (Models.TicketChatMessage message : messages) {
-                            renderChatMessage(ticketId, transcript, attachments, message);
+                            renderChatMessage(ticketId, transcript, message);
                         }
-                        transcript.setCaretPosition(transcript.getDocument().getLength());
-                        attachments.revalidate();
-                        attachments.repaint();
+                        transcript.revalidate();
+                        transcript.repaint();
                     });
                 } catch (Exception e) {
                     System.err.println("[F11] Không thể đồng bộ lại lịch sử " + ticketId + ": " + e.getMessage());
@@ -1011,7 +1007,7 @@ public class ClientMainGUI {
     }
 
     private void showTicketChatDialog(Models.Ticket ticket) {
-        JTextArea existingChat = openTicketChats.get(ticket.id);
+        JPanel existingChat = openTicketChats.get(ticket.id);
         if (existingChat != null) {
             Window window = SwingUtilities.getWindowAncestor(existingChat);
             if (window != null) window.toFront();
@@ -1023,20 +1019,16 @@ public class ClientMainGUI {
         dialog.setLocationRelativeTo(mainFrame);
         dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
 
-        JTextArea transcript = new JTextArea();
-        transcript.setEditable(false);
-        transcript.setLineWrap(true);
-        transcript.setWrapStyleWord(true);
-        transcript.setText("Đang tải lịch sử trao đổi...\n");
-        JPanel attachments = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
+        JPanel transcript = new JPanel();
+        transcript.setLayout(new BoxLayout(transcript, BoxLayout.Y_AXIS));
+        transcript.setBackground(Color.WHITE);
+        transcript.add(new JLabel("Đang tải lịch sử trao đổi..."));
         openTicketChats.put(ticket.id, transcript);
-        openTicketChatAttachments.put(ticket.id, attachments);
         loadingTicketChats.add(ticket.id);
         dialog.addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
             public void windowClosed(java.awt.event.WindowEvent e) {
                 openTicketChats.remove(ticket.id, transcript);
-                openTicketChatAttachments.remove(ticket.id, attachments);
                 pendingTicketChatMessages.remove(ticket.id);
                 loadingTicketChats.remove(ticket.id);
             }
@@ -1081,13 +1073,12 @@ public class ClientMainGUI {
         composer.add(messageInput, BorderLayout.CENTER);
         composer.add(composerActions, BorderLayout.EAST);
 
-        JPanel transcriptPanel = new JPanel(new BorderLayout(4, 4));
-        transcriptPanel.add(new JScrollPane(transcript), BorderLayout.CENTER);
-        transcriptPanel.add(new JScrollPane(attachments), BorderLayout.SOUTH);
+        JScrollPane transcriptScroll = new JScrollPane(transcript);
+        transcriptScroll.getVerticalScrollBar().setUnitIncrement(16);
         JPanel content = new JPanel(new BorderLayout(8, 8));
         content.setBorder(new EmptyBorder(12, 12, 12, 12));
         content.add(new JLabel("Trao đổi và tệp đính kèm được lưu theo yêu cầu. Giới hạn 10 MB/tệp."), BorderLayout.NORTH);
-        content.add(transcriptPanel, BorderLayout.CENTER);
+        content.add(transcriptScroll, BorderLayout.CENTER);
         content.add(composer, BorderLayout.SOUTH);
         dialog.setContentPane(content);
         dialog.setVisible(true);
@@ -1106,29 +1097,36 @@ public class ClientMainGUI {
                     }
                 }
                 SwingUtilities.invokeLater(() -> {
-                    transcript.setText("");
-                    attachments.removeAll();
-                    if (history.isEmpty()) transcript.append("Chưa có tin nhắn. Hãy bắt đầu trao đổi.\n");
+                    transcript.removeAll();
+                    if (history.isEmpty()) {
+                        JLabel emptyMessage = new JLabel("Chưa có tin nhắn. Hãy bắt đầu trao đổi.");
+                        emptyMessage.setAlignmentX(Component.LEFT_ALIGNMENT);
+                        transcript.add(emptyMessage);
+                    }
                     for (Models.TicketChatMessage message : history) {
-                        renderChatMessage(ticket.id, transcript, attachments, message);
+                        renderChatMessage(ticket.id, transcript, message);
                     }
                     loadingTicketChats.remove(ticket.id);
                     List<PendingChatEvent> pending = pendingTicketChatMessages.remove(ticket.id);
                     if (pending != null) {
                         for (PendingChatEvent event : pending) {
-                            transcript.append(event.message + "\n");
-                            addChatAttachmentButton(ticket.id, attachments, event.attachmentId, event.attachmentName);
+                            appendTicketChatMessage(ticket.id, event.message,
+                                    event.attachmentId, event.attachmentName);
                         }
                     }
-                    transcript.setCaretPosition(transcript.getDocument().getLength());
-                    attachments.revalidate();
-                    attachments.repaint();
+                    transcript.revalidate();
+                    transcript.repaint();
+                    transcriptScroll.getVerticalScrollBar().setValue(
+                            transcriptScroll.getVerticalScrollBar().getMaximum());
                 });
                 refreshChatUnreadCounts();
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
                     loadingTicketChats.remove(ticket.id);
-                    transcript.setText("Không thể tải lịch sử: " + ex.getMessage());
+                    transcript.removeAll();
+                    transcript.add(new JLabel("Không thể tải lịch sử: " + ex.getMessage()));
+                    transcript.revalidate();
+                    transcript.repaint();
                     sendButton.setEnabled(false);
                 });
             }
@@ -1184,22 +1182,122 @@ public class ClientMainGUI {
         return dot < 0 ? "" : fileName.substring(dot + 1).toLowerCase(java.util.Locale.ROOT);
     }
 
-    private void renderChatMessage(String ticketId, JTextArea transcript, JPanel attachments,
+    private void renderChatMessage(String ticketId, JPanel transcript,
                                    Models.TicketChatMessage chatMessage) {
         String line = chatMessage.sentAt + " | " + chatMessage.sender + ": " + chatMessage.content
                 + (chatMessage.sender.equalsIgnoreCase(currentUser.username)
                         ? (chatMessage.read ? " [Đã đọc]" : " [Đã gửi]") : "");
-        transcript.append(line + "\n");
-        if (chatMessage.attachmentName != null) {
-            addChatAttachmentButton(ticketId, attachments, chatMessage.id, chatMessage.attachmentName);
-        }
+        addChatMessageCard(ticketId, transcript, line, chatMessage.id,
+                chatMessage.attachmentName, chatMessage.attachmentMimeType);
     }
 
-    private void addChatAttachmentButton(String ticketId, JPanel attachments, long messageId, String fileName) {
-        if (messageId <= 0 || fileName == null || fileName.isBlank()) return;
-        JButton download = createStyledButton("Tải tệp: " + fileName, Color.WHITE, new Color(20, 35, 60), 11);
-        download.addActionListener(e -> downloadChatAttachment(ticketId, messageId, fileName));
-        attachments.add(download);
+    private void addChatMessageCard(String ticketId, JPanel transcript, String message,
+                                    long attachmentId, String attachmentName, String mimeType) {
+        JPanel card = new JPanel();
+        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
+        card.setAlignmentX(Component.LEFT_ALIGNMENT);
+        card.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(225, 230, 238)),
+                new EmptyBorder(8, 8, 8, 8)));
+        card.setBackground(Color.WHITE);
+
+        JTextArea messageText = new JTextArea(message);
+        messageText.setEditable(false);
+        messageText.setLineWrap(true);
+        messageText.setWrapStyleWord(true);
+        messageText.setBorder(null);
+        messageText.setBackground(Color.WHITE);
+        messageText.setAlignmentX(Component.LEFT_ALIGNMENT);
+        card.add(messageText);
+
+        if (attachmentId > 0 && attachmentName != null && !attachmentName.isBlank()) {
+            JLabel preview = null;
+            if (isChatImage(attachmentName, mimeType)) {
+                preview = new JLabel("Đang tải bản xem trước ảnh...");
+                preview.setAlignmentX(Component.LEFT_ALIGNMENT);
+                card.add(preview);
+            }
+            JButton download = createStyledButton("Tải tệp: " + attachmentName,
+                    Color.WHITE, new Color(20, 35, 60), 11);
+            download.setAlignmentX(Component.LEFT_ALIGNMENT);
+            card.add(download);
+            if (preview == null) {
+                download.addActionListener(e ->
+                        downloadChatAttachment(ticketId, attachmentId, attachmentName));
+            } else {
+                JLabel imagePreview = preview;
+                download.setEnabled(false);
+                loadChatImagePreview(ticketId, attachmentId, attachmentName, imagePreview, download);
+            }
+        }
+
+        transcript.add(card);
+    }
+
+    private boolean isChatImage(String fileName, String mimeType) {
+        if (mimeType != null && mimeType.toLowerCase(java.util.Locale.ROOT).startsWith("image/")) {
+            return true;
+        }
+        String extension = getFileExtension(fileName);
+        return java.util.Set.of("png", "jpg", "jpeg", "gif", "webp").contains(extension);
+    }
+
+    private void loadChatImagePreview(String ticketId, long messageId, String fileName,
+                                      JLabel preview, JButton download) {
+        new Thread(() -> {
+            try {
+                Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(
+                        Protocol.CMD_GET_CHAT_ATTACHMENT, "", "",
+                        new F11_TicketChat.ChatAttachmentRequest(ticketId, messageId)));
+                if (!Protocol.STATUS_SUCCESS.equals(response.status)
+                        || !(response.data instanceof Models.ChatAttachment attachment)) {
+                    throw new IOException(response.message);
+                }
+                Image image;
+                try (javax.imageio.stream.ImageInputStream input =
+                             javax.imageio.ImageIO.createImageInputStream(
+                                     new ByteArrayInputStream(attachment.bytes))) {
+                    if (input == null) throw new IOException("Không đọc được dữ liệu ảnh.");
+                    java.util.Iterator<javax.imageio.ImageReader> readers =
+                            javax.imageio.ImageIO.getImageReaders(input);
+                    if (!readers.hasNext()) throw new IOException("Định dạng ảnh không hỗ trợ xem trước.");
+                    javax.imageio.ImageReader reader = readers.next();
+                    try {
+                        reader.setInput(input, true, true);
+                        int width = reader.getWidth(0);
+                        int height = reader.getHeight(0);
+                        if ((long) width * height > 25_000_000L) {
+                            throw new IOException("Ảnh quá lớn để xem trước.");
+                        }
+                        image = reader.read(0);
+                    } finally {
+                        reader.dispose();
+                    }
+                }
+                if (image == null) throw new IOException("Không giải mã được ảnh.");
+                int imageWidth = image.getWidth(null);
+                int imageHeight = image.getHeight(null);
+                double scale = Math.min(1.0, Math.min(420.0 / imageWidth, 300.0 / imageHeight));
+                Image scaled = image.getScaledInstance(
+                        Math.max(1, (int) (imageWidth * scale)),
+                        Math.max(1, (int) (imageHeight * scale)), Image.SCALE_SMOOTH);
+                ImageIcon icon = new ImageIcon(scaled);
+                SwingUtilities.invokeLater(() -> {
+                    preview.setText("");
+                    preview.setIcon(icon);
+                    preview.setToolTipText(fileName);
+                    download.setEnabled(true);
+                    download.addActionListener(e -> saveChatAttachment(attachment));
+                });
+            } catch (Exception ex) {
+                SwingUtilities.invokeLater(() -> {
+                    preview.setText("Không thể xem trước ảnh: " + ex.getMessage());
+                    download.setEnabled(true);
+                    download.addActionListener(e ->
+                            downloadChatAttachment(ticketId, messageId, fileName));
+                });
+            }
+        }, "f11-load-chat-image").start();
     }
 
     private void downloadChatAttachment(String ticketId, long messageId, String fileName) {
@@ -1212,25 +1310,27 @@ public class ClientMainGUI {
                         || !(response.data instanceof Models.ChatAttachment attachment)) {
                     throw new IOException(response.message);
                 }
-                SwingUtilities.invokeLater(() -> {
-                    JFileChooser chooser = new JFileChooser();
-                    chooser.setSelectedFile(new File(attachment.fileName));
-                    if (chooser.showSaveDialog(mainFrame) == JFileChooser.APPROVE_OPTION) {
-                        try {
-                            java.nio.file.Files.write(chooser.getSelectedFile().toPath(), attachment.bytes);
-                            JOptionPane.showMessageDialog(mainFrame, "Đã lưu tệp tại "
-                                    + chooser.getSelectedFile().getAbsolutePath());
-                        } catch (IOException ex) {
-                            JOptionPane.showMessageDialog(mainFrame, ex.getMessage(),
-                                    "Không thể lưu tệp", JOptionPane.ERROR_MESSAGE);
-                        }
-                    }
-                });
+                SwingUtilities.invokeLater(() -> saveChatAttachment(attachment));
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(mainFrame, ex.getMessage(),
                         "Không thể tải tệp chat", JOptionPane.ERROR_MESSAGE));
             }
         }, "f11-download-attachment").start();
+    }
+
+    private void saveChatAttachment(Models.ChatAttachment attachment) {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setSelectedFile(new File(attachment.fileName));
+        if (chooser.showSaveDialog(mainFrame) == JFileChooser.APPROVE_OPTION) {
+            try {
+                java.nio.file.Files.write(chooser.getSelectedFile().toPath(), attachment.bytes);
+                JOptionPane.showMessageDialog(mainFrame, "Đã lưu tệp tại "
+                        + chooser.getSelectedFile().getAbsolutePath());
+            } catch (IOException ex) {
+                JOptionPane.showMessageDialog(mainFrame, ex.getMessage(),
+                        "Không thể lưu tệp", JOptionPane.ERROR_MESSAGE);
+            }
+        }
     }
 
     private void appendTicketChatMessage(String ticketId, String message,
@@ -1240,11 +1340,17 @@ public class ClientMainGUI {
                     .add(new PendingChatEvent(message, attachmentId, attachmentName));
             return;
         }
-        JTextArea transcript = openTicketChats.get(ticketId);
+        JPanel transcript = openTicketChats.get(ticketId);
         if (transcript == null) return;
-        transcript.append(message + "\n");
-        transcript.setCaretPosition(transcript.getDocument().getLength());
-        addChatAttachmentButton(ticketId, openTicketChatAttachments.get(ticketId), attachmentId, attachmentName);
+        addChatMessageCard(ticketId, transcript, message, attachmentId, attachmentName, null);
+        transcript.revalidate();
+        transcript.repaint();
+        JScrollPane scrollPane = (JScrollPane) SwingUtilities.getAncestorOfClass(
+                JScrollPane.class, transcript);
+        if (scrollPane != null) {
+            SwingUtilities.invokeLater(() -> scrollPane.getVerticalScrollBar().setValue(
+                    scrollPane.getVerticalScrollBar().getMaximum()));
+        }
     }
 
     private JButton chatActionButton;
