@@ -49,6 +49,7 @@ public class Models {
         public String id;
         public String title;
         public String category;
+        public String device;
         public String priority; // Thấp, Bình thường, Cao, Khẩn cấp
         public String createdDate;
         public String status; // Mới, Đang xử lý, Hoàn thành, Đã hủy

@@ -29,7 +29,6 @@ public class ServerMain {
     private boolean isRunning = false;
     private ExecutorService threadPool;
     private ScheduledExecutorService slaMonitor;
-    private java.util.List<NetworkSecurityConfig.Cidr> allowedNetworks = java.util.List.of();
     private final F06_NotificationBroadcaster broadcaster = new F06_NotificationBroadcaster();
 
     // UI Components for Server Control Panel
@@ -146,7 +145,6 @@ public class ServerMain {
     public synchronized void startServer(int port) {
         if (isRunning) return;
         try {
-            allowedNetworks = NetworkSecurityConfig.getAllowedNetworks();
             serverSocket = NetworkSecurityConfig.createServerSocket(port);
             isRunning = true;
             threadPool = Executors.newCachedThreadPool();
@@ -159,7 +157,7 @@ public class ServerMain {
                     : "CẢNH BÁO: TLS đang tắt; lưu lượng mạng chưa được mã hóa.");
             log("Chế độ lưu trữ: " + (DatabaseManager.getInstance().isUsingMySQL() ? "MySQL Server (workdesk_db)" : "Local Datastore (Bộ nhớ tích hợp an toàn)"));
             log("Sẵn sàng lắng nghe kết nối từ các Client (F01-F11)...");
-            log("CIDR được phép: " + System.getenv().getOrDefault("WORKDESK_ALLOWED_CIDRS", "127.0.0.0/8,::1/128 (mặc định localhost)"));
+            log("Chính sách mạng: chỉ cho phép địa chỉ IPv4 nội bộ hoặc IPv6 ULA/loopback.");
 
             if (statusLabel != null) {
                 statusLabel.setText("TRẠNG THÁI: ĐANG CHẠY (PORT " + port + ")");
@@ -171,9 +169,8 @@ public class ServerMain {
                 while (isRunning && !serverSocket.isClosed()) {
                     try {
                         Socket clientSocket = serverSocket.accept();
-                        if (!NetworkSecurityConfig.isAddressAllowed(
-                                clientSocket.getInetAddress(), allowedNetworks)) {
-                            log("[Từ chối kết nối] IP ngoài CIDR được phép: "
+                        if (!NetworkSecurityConfig.isAddressAllowed(clientSocket.getInetAddress())) {
+                            log("[Từ chối kết nối] Địa chỉ không thuộc mạng nội bộ: "
                                     + clientSocket.getInetAddress().getHostAddress());
                             clientSocket.close();
                             continue;

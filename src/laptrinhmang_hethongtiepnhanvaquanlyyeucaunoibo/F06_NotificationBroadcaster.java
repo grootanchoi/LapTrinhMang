@@ -171,8 +171,14 @@ public class F06_NotificationBroadcaster {
     }
 
     public void sendToRole(String role, String eventType, String ticketId, String message) {
+        sendToRole(role, eventType, ticketId, message, 0, null);
+    }
+
+    public void sendToRole(String role, String eventType, String ticketId, String message,
+                           long attachmentMessageId, String attachmentName) {
         String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss dd/MM"));
-        Models.NotificationMessage notif = new Models.NotificationMessage(eventType, ticketId, message, timestamp);
+        Models.NotificationMessage notif = new Models.NotificationMessage(eventType, ticketId, message, timestamp,
+                attachmentMessageId, attachmentName);
         Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_NOTIFICATION, Protocol.STATUS_SUCCESS, message, notif);
         for (ClientSessionHolder session : activeSessions) {
             if (session.isConnected() && role.equalsIgnoreCase(session.getRole())) {

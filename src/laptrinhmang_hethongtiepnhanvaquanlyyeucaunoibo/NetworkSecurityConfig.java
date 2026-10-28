@@ -7,8 +7,6 @@ import java.net.Socket;
 import java.net.InetAddress;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
-import java.util.ArrayList;
-import java.util.List;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLServerSocket;
@@ -25,8 +23,6 @@ public final class NetworkSecurityConfig {
     private static final String KEYSTORE_PASSWORD = "WORKDESK_KEYSTORE_PASSWORD";
     private static final String TRUSTSTORE_PATH = "WORKDESK_TRUSTSTORE";
     private static final String TRUSTSTORE_PASSWORD = "WORKDESK_TRUSTSTORE_PASSWORD";
-    private static final String ALLOWED_CIDRS = "WORKDESK_ALLOWED_CIDRS";
-    private static final String DEFAULT_ALLOWED_CIDRS = "127.0.0.0/8,::1/128";
 
     private NetworkSecurityConfig() {}
 
@@ -34,48 +30,18 @@ public final class NetworkSecurityConfig {
         return Boolean.parseBoolean(System.getenv(TLS_ENABLED));
     }
 
-    public static List<Cidr> getAllowedNetworks() throws IOException {
-        String configuredCidrs = System.getenv(ALLOWED_CIDRS);
-        if (configuredCidrs == null || configuredCidrs.isBlank()) {
-            configuredCidrs = DEFAULT_ALLOWED_CIDRS;
-        }
-        try {
-            return parseCidrs(configuredCidrs);
-        } catch (IllegalArgumentException e) {
-            throw new IOException("WORKDESK_ALLOWED_CIDRS không hợp lệ: " + e.getMessage(), e);
-        }
-    }
-
-    static List<Cidr> parseCidrs(String cidrs) {
-        if (cidrs == null || cidrs.isBlank()) throw new IllegalArgumentException("Danh sách CIDR đang trống.");
-        List<Cidr> networks = new ArrayList<>();
-        for (String value : cidrs.split(",")) {
-            String cidr = value.trim();
-            int slash = cidr.indexOf('/');
-            if (slash < 1 || slash != cidr.lastIndexOf('/')) {
-                throw new IllegalArgumentException("CIDR không hợp lệ: " + cidr);
-            }
-            String addressText = cidr.substring(0, slash);
-            if (!addressText.matches("[0-9.]+") && !addressText.contains(":")) {
-                throw new IllegalArgumentException("Địa chỉ phải là IPv4/IPv6 dạng số: " + addressText);
-            }
-            try {
-                byte[] address = normalizeAddress(InetAddress.getByName(addressText).getAddress());
-                int prefix = Integer.parseInt(cidr.substring(slash + 1));
-                if (prefix < 0 || prefix > address.length * 8) {
-                    throw new IllegalArgumentException("Độ dài prefix không hợp lệ: " + cidr);
-                }
-                networks.add(new Cidr(address, prefix));
-            } catch (IOException | NumberFormatException e) {
-                throw new IllegalArgumentException("CIDR không hợp lệ: " + cidr, e);
-            }
-        }
-        return List.copyOf(networks);
-    }
-
-    static boolean isAddressAllowed(InetAddress address, List<Cidr> allowedNetworks) {
+    static boolean isAddressAllowed(InetAddress address) {
         byte[] candidate = normalizeAddress(address.getAddress());
-        return allowedNetworks.stream().anyMatch(network -> network.matches(candidate));
+        if (candidate.length == 4) {
+            int firstOctet = candidate[0] & 0xff;
+            int secondOctet = candidate[1] & 0xff;
+            return firstOctet == 127
+                    || firstOctet == 10
+                    || (firstOctet == 172 && secondOctet >= 16 && secondOctet <= 31)
+                    || (firstOctet == 192 && secondOctet == 168);
+        }
+        return candidate.length == 16 && (address.isLoopbackAddress()
+                || (candidate[0] & 0xfe) == 0xfc);
     }
 
     private static byte[] normalizeAddress(byte[] address) {
@@ -88,28 +54,6 @@ public final class NetworkSecurityConfig {
             }
         }
         return address;
-    }
-
-    static final class Cidr {
-        private final byte[] address;
-        private final int prefix;
-
-        private Cidr(byte[] address, int prefix) {
-            this.address = address;
-            this.prefix = prefix;
-        }
-
-        private boolean matches(byte[] candidate) {
-            if (address.length != candidate.length) return false;
-            int fullBytes = prefix / 8;
-            int remainingBits = prefix % 8;
-            for (int i = 0; i < fullBytes; i++) {
-                if (address[i] != candidate[i]) return false;
-            }
-            if (remainingBits == 0) return true;
-            int mask = 0xff << (8 - remainingBits);
-            return (address[fullBytes] & mask) == (candidate[fullBytes] & mask);
-        }
     }
 
     public static ServerSocket createServerSocket(int port) throws IOException {

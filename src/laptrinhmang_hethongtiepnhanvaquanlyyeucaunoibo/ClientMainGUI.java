@@ -53,6 +53,7 @@ public class ClientMainGUI {
     private JTextArea inspectorTitle;
     private JLabel inspectorOwner;
     private JLabel inspectorDepartment;
+    private JLabel inspectorDevice;
     private JLabel inspectorSourceIp;
     private JLabel inspectorCreatedAt;
     private JLabel inspectorSla;
@@ -234,7 +235,8 @@ public class ClientMainGUI {
                 }
                 if ("TICKET_CREATED".equals(notification.eventType)
                         || "STATUS_CHANGED".equals(notification.eventType)
-                        || "TICKET_ASSIGNED".equals(notification.eventType)) {
+                        || "TICKET_ASSIGNED".equals(notification.eventType)
+                        || "TICKET_UPDATED".equals(notification.eventType)) {
                     requestTicketList();
                 }
                 if (!"TICKET_CHAT_MESSAGE".equals(notification.eventType)
@@ -444,6 +446,7 @@ public class ClientMainGUI {
         boolean isRequester = "requester".equalsIgnoreCase(currentUser.role);
         boolean canManageTickets = "admin".equalsIgnoreCase(currentUser.role)
                 || "tech".equalsIgnoreCase(currentUser.role);
+        boolean canUpdateProgress = "tech".equalsIgnoreCase(currentUser.role);
         boolean canAssignTechnician = isAdmin;
         mainFrame = new JFrame("WorkDesk | Bàn làm việc - [" + currentUser.displayName + " / " + currentUser.getRoleName() + "]");
         mainFrame.setSize(1180, 720);
@@ -678,7 +681,7 @@ public class ClientMainGUI {
         });
 
         if (canAssignTechnician) primaryActions.add(btnAssign);
-        if (canManageTickets) primaryActions.add(btnUpdateStatus);
+        if (canUpdateProgress) primaryActions.add(btnUpdateStatus);
         primaryActions.add(btnDownloadAttach);
         secondaryActions.add(btnChat);
         secondaryActions.add(btnHistory);
@@ -692,7 +695,8 @@ public class ClientMainGUI {
         bottomBar.add(actionButtons, BorderLayout.CENTER);
         tableCard.add(bottomBar, BorderLayout.SOUTH);
 
-        JPanel inspector = createTicketInspector(isAdmin, canManageTickets, canAssignTechnician);
+        JPanel inspector = createTicketInspector(isAdmin, canManageTickets, canAssignTechnician,
+                canUpdateProgress);
         inspector.setMinimumSize(new Dimension(300, 200));
         JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, tableCard, inspector);
         splitPane.setResizeWeight(0.60);
@@ -712,7 +716,7 @@ public class ClientMainGUI {
     }
 
     private JPanel createTicketInspector(boolean isAdmin, boolean canManageTickets,
-                                         boolean canAssignTechnician) {
+                                         boolean canAssignTechnician, boolean canUpdateProgress) {
         JPanel inspector = new JPanel(new BorderLayout(0, 10));
         inspector.setBackground(Color.WHITE);
         inspector.setBorder(BorderFactory.createCompoundBorder(
@@ -747,6 +751,8 @@ public class ClientMainGUI {
         inspectorCreatedAt = detailValueLabel("Thời gian gửi: —");
         inspectorSla = detailValueLabel("Hạn SLA: —");
         inspectorLatestNote = detailValueLabel("Ghi chú mới nhất: —");
+        inspectorDevice = canManageTickets ? detailValueLabel("Thiết bị: —") : null;
+        if (inspectorDevice != null) inspectorDevice.setOpaque(false);
         JPanel ownerDepartmentRow = new JPanel(new GridLayout(1, 2, 8, 0));
         ownerDepartmentRow.setOpaque(false);
         ownerDepartmentRow.add(inspectorOwner);
@@ -784,6 +790,10 @@ public class ClientMainGUI {
         }
         details.add(Box.createVerticalStrut(3));
         details.add(createdSlaRow);
+        if (inspectorDevice != null) {
+            details.add(Box.createVerticalStrut(3));
+            details.add(inspectorDevice);
+        }
         details.add(Box.createVerticalStrut(3));
         details.add(inspectorLatestNote);
         details.add(Box.createVerticalStrut(4));
@@ -802,7 +812,6 @@ public class ClientMainGUI {
         });
         JButton update = createStyledButton("Tiến độ", new Color(25, 135, 84), Color.WHITE, 11);
         compactInspectorButton(update);
-        update.setVisible(canManageTickets);
         update.addActionListener(event -> {
             Models.Ticket selected = getSelectedTicket();
             if (selected != null) showUpdateStatusDialog(selected.id);
@@ -836,7 +845,7 @@ public class ClientMainGUI {
             }
         });
         quickActions.add(assign);
-        quickActions.add(update);
+        if (canUpdateProgress) quickActions.add(update);
         quickActions.add(download);
         quickActions.add(history);
         quickActions.add(detail);
@@ -901,6 +910,7 @@ public class ClientMainGUI {
             updateInspectorTitleHeight((JPanel) inspectorTitle.getParent());
             inspectorOwner.setText("Người gửi: —");
             inspectorDepartment.setText("Phòng ban: —");
+            if (inspectorDevice != null) inspectorDevice.setText("Thiết bị: —");
             if (inspectorSourceIp != null) {
                 inspectorSourceIp.setText("IP máy gửi: —");
             }
@@ -921,13 +931,18 @@ public class ClientMainGUI {
         updateInspectorTitleHeight((JPanel) inspectorTitle.getParent());
         inspectorOwner.setText("Người gửi: " + nullSafe(ticket.owner));
         inspectorDepartment.setText("Phòng ban: " + nullSafe(ticket.ownerDepartment));
+        if (inspectorDevice != null) {
+            String device = ticket.device == null || ticket.device.isBlank() ? "Chưa ghi nhận" : ticket.device;
+            inspectorDevice.setText("Thiết bị: " + device);
+        }
         if (inspectorSourceIp != null) {
             String ipDisplay = (ticket.sourceIp == null || ticket.sourceIp.isBlank())
                     ? "Chưa ghi nhận" : ticket.sourceIp;
             inspectorSourceIp.setText("IP máy gửi: " + ipDisplay);
         }
         inspectorCreatedAt.setText("Gửi: " + formatCompactCreatedAt(ticket.createdAt, ticket.createdDate));
-        inspectorSla.setText("SLA: " + formatSlaDeadline(ticket.slaDueAt));
+        inspectorSla.setText("SLA: " + formatSlaDeadline(
+                ticket.slaDueAt, ticket.status, ticket.progress));
         inspectorLatestNote.setText("<html><body style='width:270px'>Ghi chú: "
                 + escapeHtml(nullSafe(ticket.latestNote)) + "</body></html>");
         inspectorProgress.setValue(Math.max(0, Math.min(100, ticket.progress)));
@@ -1087,22 +1102,37 @@ public class ClientMainGUI {
                                                        boolean selected, boolean focus,
                                                        int row, int column) {
             String raw = value == null ? "" : value.toString();
+            String status = String.valueOf(table.getValueAt(row, 7));
+            Object progressValue = table.getValueAt(row, 6);
+            int progress = progressValue instanceof Number number ? number.intValue() : 0;
+            boolean completed = "Hoàn thành".equalsIgnoreCase(status) || progress >= 100;
+            boolean cancelled = "Đã hủy".equalsIgnoreCase(status);
             String text = "Chưa có hạn";
             Color color = new Color(71, 85, 105);
+            if (cancelled) {
+                text = "Đã hủy";
+                color = new Color(100, 116, 139);
+            }
             try {
-                java.time.LocalDateTime due = java.time.LocalDateTime.parse(raw);
-                double hours = BusinessHours.workingHoursBetween(java.time.LocalDateTime.now(), due);
-                boolean overdue = due.isBefore(java.time.LocalDateTime.now());
-                String date = due.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM HH:mm"));
-                if (overdue) {
-                    text = "[QUÁ HẠN] " + date;
-                    color = new Color(185, 28, 28);
-                } else {
-                    text = date;
-                    if (hours <= 1.0) color = AMBER;
+                if (!cancelled) {
+                    java.time.LocalDateTime due = java.time.LocalDateTime.parse(raw);
+                    double hours = BusinessHours.workingHoursBetween(java.time.LocalDateTime.now(), due);
+                    boolean overdue = due.isBefore(java.time.LocalDateTime.now());
+                    String date = due.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM HH:mm"));
+                    if (completed) {
+                        text = "[Đã xong] " + date;
+                        color = new Color(21, 128, 61);
+                    } else if (overdue && ("Mới".equalsIgnoreCase(status)
+                            || "Đang xử lý".equalsIgnoreCase(status))) {
+                        text = "[QUÁ HẠN] " + date;
+                        color = new Color(185, 28, 28);
+                    } else {
+                        text = date;
+                        if (hours <= 1.0) color = AMBER;
+                    }
                 }
             } catch (java.time.format.DateTimeParseException ignored) {
-                if (!raw.isBlank()) text = raw;
+                if (!cancelled && !raw.isBlank()) text = raw;
             }
             super.getTableCellRendererComponent(table, text, selected, focus, row, column);
             setForeground(selected ? table.getSelectionForeground() : color);
@@ -1241,11 +1271,14 @@ public class ClientMainGUI {
         }
     }
 
-    private String formatSlaDeadline(String value) {
+    private String formatSlaDeadline(String value, String status, int progress) {
+        if ("Đã hủy".equalsIgnoreCase(status)) return "Đã hủy";
         if (value == null || value.isBlank()) return "Chưa có hạn";
         try {
             java.time.LocalDateTime due = java.time.LocalDateTime.parse(value);
-            String prefix = due.isBefore(java.time.LocalDateTime.now()) ? "Quá hạn: " : "";
+            boolean terminal = "Hoàn thành".equalsIgnoreCase(status) || progress >= 100;
+            String prefix = !terminal && due.isBefore(java.time.LocalDateTime.now())
+                    ? "Quá hạn: " : terminal ? "[Đã xong] " : "";
             return prefix + due.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM HH:mm"));
         } catch (java.time.format.DateTimeParseException e) {
             return value;
@@ -1417,13 +1450,22 @@ public class ClientMainGUI {
         JTextField txtTitle = new JTextField();
         JComboBox<String> cbCategory = new JComboBox<>(new String[]{"IT - Phần cứng", "Mạng & Internet", "Phần mềm & Cấp quyền", "Nhân sự", "Hành chính", "Tài chính"});
         JComboBox<String> cbPriority = new JComboBox<>(new String[]{"Bình thường", "Thấp", "Cao", "Khẩn cấp"});
+        JComboBox<String> cbDevice = new JComboBox<>(new String[]{
+            "Máy tính để bàn (PC)",
+            "Máy tính xách tay (Laptop)",
+            "Máy in / Máy quét (Printer/Scanner)",
+            "Thiết bị mạng (Wifi / Router / Switch)",
+            "Điện thoại bàn / IP Phone",
+            "Thiết bị phòng họp / Máy chiếu",
+            "Thiết bị khác"
+        });
         JLabel lblSlaPreview = new JLabel();
         Runnable updateSlaPreview = () -> {
             String workingHours = switch ((String) cbPriority.getSelectedItem()) {
                 case "Khẩn cấp" -> "4";
-                case "Cao" -> "24";
-                case "Thấp" -> "120";
-                default -> "72";
+                case "Cao" -> "8";
+                case "Thấp" -> "48";
+                default -> "24";
             };
             lblSlaPreview.setText("Hạn xử lý SLA: " + workingHours + " giờ làm việc");
         };
@@ -1452,6 +1494,8 @@ public class ClientMainGUI {
         p.add(new JLabel("Mức độ ưu tiên:"));
         p.add(cbPriority);
         p.add(lblSlaPreview);
+        p.add(new JLabel("Thiết bị gặp sự cố:"));
+        p.add(cbDevice);
         p.add(new JLabel("Mô tả chi tiết sự cố: *"));
         p.add(new JScrollPane(txtDetail));
 
@@ -1492,7 +1536,8 @@ public class ClientMainGUI {
 
             F02_CreateTicket.CreateTicketRequest req = new F02_CreateTicket.CreateTicketRequest(
                     title, (String) cbCategory.getSelectedItem(), (String) cbPriority.getSelectedItem(),
-                    detail, currentUser.username, fileName, attachmentBytes
+                    detail, currentUser.username, fileName, attachmentBytes,
+                    (String) cbDevice.getSelectedItem()
             );
 
             btnSubmit.setEnabled(false);
@@ -1528,11 +1573,6 @@ public class ClientMainGUI {
     private void showTicketDetailDialog(String ticketId) {
         Models.Ticket t = cachedTickets.stream().filter(x -> x.id.equals(ticketId)).findFirst().orElse(null);
         if (t == null) return;
-        if (t.assignedTech == null || t.assignedTech.isBlank()
-                || "Chưa phân công".equalsIgnoreCase(t.assignedTech)) {
-            showToastNotification("Yêu cầu chưa được phân công kỹ thuật viên. Vui lòng phân công KTV trước khi cập nhật tiến độ.");
-            return;
-        }
 
         JDialog d = new JDialog(mainFrame, "Chi tiết yêu cầu: " + t.id, true);
         d.setSize(520, 500);
@@ -1550,6 +1590,10 @@ public class ClientMainGUI {
         p.add(new JLabel("<html><b>Phòng ban:</b> "
                 + (t.ownerDepartment == null || t.ownerDepartment.isBlank() ? "Chưa cập nhật" : t.ownerDepartment)
                 + "</html>"));
+        if ("admin".equalsIgnoreCase(currentUser.role) || "tech".equalsIgnoreCase(currentUser.role)) {
+            String device = t.device == null || t.device.isBlank() ? "Chưa ghi nhận" : t.device;
+            p.add(new JLabel("<html><b>Thiết bị:</b> " + escapeHtml(device) + "</html>"));
+        }
         if ("admin".equalsIgnoreCase(currentUser.role)) {
             p.add(new JLabel("<html><b>IP máy gửi:</b> "
                     + (t.sourceIp == null || t.sourceIp.isBlank() ? "Chưa ghi nhận" : t.sourceIp) + "</html>"));
@@ -2234,8 +2278,8 @@ public class ClientMainGUI {
     // F05: CẬP NHẬT TRẠNG THÁI XỬ LÝ & TIẾN ĐỘ (% HOÀN THÀNH / SỐ BYTE)
     // =========================================================================
     private void showUpdateStatusDialog(String ticketId) {
-        if ("requester".equalsIgnoreCase(currentUser.role)) {
-            JOptionPane.showMessageDialog(mainFrame, "Chỉ Kỹ thuật viên hoặc Quản trị viên mới được cập nhật tiến độ.");
+        if (currentUser == null || !"tech".equalsIgnoreCase(currentUser.role)) {
+            JOptionPane.showMessageDialog(mainFrame, "Chỉ Kỹ thuật viên mới được cập nhật tiến độ.");
             return;
         }
 

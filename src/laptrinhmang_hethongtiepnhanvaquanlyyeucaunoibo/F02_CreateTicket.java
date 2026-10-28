@@ -23,6 +23,7 @@ public class F02_CreateTicket {
         private static final long serialVersionUID = 1L;
         public String title;
         public String category;
+        public String device;
         public String priority;
         public String detail;
         public String owner;
@@ -30,13 +31,19 @@ public class F02_CreateTicket {
         public byte[] attachmentBytes;
 
         public CreateTicketRequest(String title, String category, String priority, String detail, String owner, String attachmentName) {
-            this(title, category, priority, detail, owner, attachmentName, null);
+            this(title, category, priority, detail, owner, attachmentName, null, "");
         }
 
         public CreateTicketRequest(String title, String category, String priority, String detail,
                                    String owner, String attachmentName, byte[] attachmentBytes) {
+            this(title, category, priority, detail, owner, attachmentName, attachmentBytes, "");
+        }
+
+        public CreateTicketRequest(String title, String category, String priority, String detail,
+                                   String owner, String attachmentName, byte[] attachmentBytes, String device) {
             this.title = title;
             this.category = category;
+            this.device = device;
             this.priority = priority;
             this.detail = detail;
             this.owner = owner;
@@ -67,6 +74,9 @@ public class F02_CreateTicket {
         }
         if (req.detail == null || req.detail.trim().isEmpty()) {
             return Protocol.Packet.error(Protocol.CMD_CREATE_TICKET, "Mô tả chi tiết yêu cầu không được để trống.");
+        }
+        if (req.device != null && req.device.trim().length() > 100) {
+            return Protocol.Packet.error(Protocol.CMD_CREATE_TICKET, "Tên thiết bị không được vượt quá 100 ký tự.");
         }
         if (user.department == null || user.department.isBlank()) {
             return Protocol.Packet.error(Protocol.CMD_CREATE_TICKET,
@@ -117,6 +127,7 @@ public class F02_CreateTicket {
                 storedAttachmentName
         );
         ticket.createdAt = createdAt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        ticket.device = req.device == null ? "" : req.device.trim();
         ticket.ownerDepartment = user.department.trim();
         ticket.sourceIp = sourceIp;
 

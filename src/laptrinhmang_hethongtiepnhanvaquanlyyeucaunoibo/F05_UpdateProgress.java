@@ -5,7 +5,7 @@ import java.io.Serializable;
 /**
  * CHỨC NĂNG F05: CẬP NHẬT TRẠNG THÁI XỬ LÝ VÀ TIẾN ĐỘ
  * =========================================================================
- * - Xử lý chính: Server xác thực quyền kỹ thuật viên / Quản trị viên, kiểm tra
+ * - Xử lý chính: Server xác thực quyền kỹ thuật viên được phân công, kiểm tra
  *                tính hợp lệ của trạng thái mới, cập nhật cơ sở dữ liệu MySQL,
  *                lưu vết lịch sử xử lý và thông báo kết quả.
  * - Đầu vào / đầu ra: Số byte / % hoàn thành (Theo dõi tiến độ xử lý và số byte truyền nhận).
@@ -63,8 +63,8 @@ public class F05_UpdateProgress {
     // =========================================================================
     public static Protocol.Packet handleServerUpdateProgress(Protocol.Packet requestPacket, Models.User user,
                                                               F06_NotificationBroadcaster broadcaster) {
-        if (user == null || !("admin".equalsIgnoreCase(user.role) || "tech".equalsIgnoreCase(user.role))) {
-            return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Chỉ Kỹ thuật viên hoặc Quản trị viên mới được cập nhật tiến độ.");
+        if (user == null || !"tech".equalsIgnoreCase(user.role)) {
+            return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Chỉ Kỹ thuật viên mới được cập nhật tiến độ.");
         }
         if (!(requestPacket.data instanceof UpdateProgressRequest req)) {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Dữ liệu cập nhật tiến độ không đúng định dạng.");
@@ -90,7 +90,7 @@ public class F05_UpdateProgress {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS,
                     "Yêu cầu chưa được phân công kỹ thuật viên. Vui lòng phân công KTV trước khi cập nhật tiến độ.");
         }
-        if ("tech".equalsIgnoreCase(user.role) && !user.username.equalsIgnoreCase(t.assignedTech)) {
+        if (user.username == null || !user.username.equalsIgnoreCase(t.assignedTech)) {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Chỉ kỹ thuật viên được phân công mới được cập nhật yêu cầu này.");
         }
         if (req.resultFileBytes != null && req.resultFileBytes.length > 0

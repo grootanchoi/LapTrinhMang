@@ -8,7 +8,6 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -46,13 +45,13 @@ public final class NetworkIntegrationTests {
             clients.add(admin);
 
             testRoleAuthorization(requester, technician, admin);
-            testF05ResultAttachment(db, requester, technician);
+            testF05ResultAttachment(db, requester, technician, admin);
             testSessionPolicies(port, requester, technician, admin);
             testCorrelatedConcurrentRequests(db, port);
             testTicketQuotaAndMetadata(db, port, admin);
             testAdminTicketManagement(db, requester, technician, admin);
             testSlaAlerts(db, server, requester, technician);
-            testChatAttachment(requester, technician);
+            testChatAttachment(requester, technician, admin);
             testChatReadStatus(db, requester, technician);
             testHeartbeat(requester);
             testConcurrentClients(port, requester, technician, admin);
@@ -102,20 +101,22 @@ public final class NetworkIntegrationTests {
     }
 
     private static void testNetworkAccessPolicy() throws Exception {
-        List<NetworkSecurityConfig.Cidr> allowed = NetworkSecurityConfig.parseCidrs("192.168.10.0/24,::1/128");
         check(NetworkSecurityConfig.isAddressAllowed(
-                java.net.InetAddress.getByName("192.168.10.42"), allowed), "CIDR allows an address in the configured subnet");
+                java.net.InetAddress.getByName("192.168.10.42")), "private IPv4 LAN client is allowed");
+        check(NetworkSecurityConfig.isAddressAllowed(
+                java.net.InetAddress.getByName("10.20.1.42")), "private 10/8 client is allowed");
+        check(NetworkSecurityConfig.isAddressAllowed(
+                java.net.InetAddress.getByName("172.20.1.42")), "private 172.16/12 client is allowed");
+        check(NetworkSecurityConfig.isAddressAllowed(
+                java.net.InetAddress.getByName("127.0.0.1")), "IPv4 loopback is allowed");
+        check(NetworkSecurityConfig.isAddressAllowed(
+                java.net.InetAddress.getByName("::1")), "IPv6 loopback is allowed");
+        check(NetworkSecurityConfig.isAddressAllowed(
+                java.net.InetAddress.getByName("fc00::1")), "IPv6 unique-local client is allowed");
         check(!NetworkSecurityConfig.isAddressAllowed(
-                java.net.InetAddress.getByName("192.168.11.42"), allowed), "CIDR rejects an address outside the configured subnet");
-        check(NetworkSecurityConfig.isAddressAllowed(java.net.InetAddress.getByName("::1"), allowed),
-                "CIDR supports IPv6 loopback");
-        boolean rejectedInvalid = false;
-        try {
-            NetworkSecurityConfig.parseCidrs("not-a-cidr");
-        } catch (IllegalArgumentException e) {
-            rejectedInvalid = true;
-        }
-        check(rejectedInvalid, "invalid CIDR configuration is rejected");
+                java.net.InetAddress.getByName("8.8.8.8")), "public IPv4 client is rejected");
+        check(!NetworkSecurityConfig.isAddressAllowed(
+                java.net.InetAddress.getByName("2001:4860:4860::8888")), "public IPv6 client is rejected");
     }
 
     private static void testTicketQuotaAndMetadata(DatabaseManager db, int port, TestClient admin) throws Exception {
@@ -149,7 +150,7 @@ public final class NetworkIntegrationTests {
                 F02_CreateTicket.CreateTicketRequest request = new F02_CreateTicket.CreateTicketRequest(
                         "Quota test " + i, "IT", "Thấp", "Test quota and metadata", "forged-owner",
                         i == 1 ? "integration-attachment.txt" : "",
-                        i == 1 ? attachmentBytes : null);
+                        i == 1 ? attachmentBytes : null, i == 1 ? "Máy tính xách tay (Laptop)" : "");
                 Protocol.Packet response = client.request(new Protocol.Packet(
                         Protocol.CMD_CREATE_TICKET, "", "", request));
                 check(Protocol.STATUS_SUCCESS.equals(response.status), "requester can create ticket " + i + " within quota");
@@ -161,6 +162,12 @@ public final class NetworkIntegrationTests {
                 check(username.equals(ticket.owner), "ticket owner comes from authenticated account");
                 check("QA".equals(ticket.ownerDepartment), "ticket stores the requester's department snapshot");
                 check("127.0.0.1".equals(ticket.sourceIp), "ticket stores the remote socket IP");
+                if (i == 1) {
+                    check("Máy tính xách tay (Laptop)".equals(ticket.device),
+                            "F02 response includes the selected device");
+                    check("Máy tính xách tay (Laptop)".equals(db.getTicketById(ticket.id).device),
+                            "selected device persists in ticket storage");
+                }
             }
             Protocol.Packet downloaded = client.request(new Protocol.Packet(Protocol.CMD_DOWNLOAD_FILE, "", "",
                     new F04_AssignTechnician.FileDownloadRequest(firstNewTicket.attachmentName,
@@ -192,7 +199,7 @@ public final class NetworkIntegrationTests {
     }
 
     private static void testF05ResultAttachment(DatabaseManager db, TestClient requester,
-                                                TestClient technician) throws Exception {
+                                                TestClient technician, TestClient admin) throws Exception {
         String unassignedTicketId = "YC-F05-UNASSIGNED-" + UUID.randomUUID().toString().substring(0, 8);
         Models.Ticket unassignedTicket = new Models.Ticket(unassignedTicketId, "Unassigned F05 test", "IT", "Thấp",
                 java.time.LocalDate.now().toString(), "Mới", "user02", "Chưa phân công",
@@ -212,6 +219,21 @@ public final class NetworkIntegrationTests {
                 java.time.LocalDate.now().toString(), "Đang xử lý", "user02", "tech01",
                 "F05 result attachment fixture", 0, "");
         check(db.insertTicket(ticket), "F05 result attachment fixture is stored");
+        Protocol.Packet adminUpdate = admin.request(new Protocol.Packet(Protocol.CMD_UPDATE_STATUS, "", "",
+                new F05_UpdateProgress.UpdateProgressRequest(ticketId, "Đang xử lý", 10,
+                        "forbidden admin update", "admin", "", null)));
+        check(Protocol.STATUS_ERROR.equals(adminUpdate.status),
+                "F05 rejects progress updates from admins");
+        String otherTechTicketId = "YC-F05-OTHER-TECH-" + UUID.randomUUID().toString().substring(0, 8);
+        Models.Ticket otherTechTicket = new Models.Ticket(otherTechTicketId, "Other technician F05 test", "IT", "Thấp",
+                java.time.LocalDate.now().toString(), "Mới", "user02", "tech02",
+                "F05 assigned technician authorization fixture", 0, "");
+        check(db.insertTicket(otherTechTicket), "other technician F05 fixture is stored");
+        Protocol.Packet unassignedTechUpdate = technician.request(new Protocol.Packet(Protocol.CMD_UPDATE_STATUS, "", "",
+                new F05_UpdateProgress.UpdateProgressRequest(otherTechTicketId, "Đang xử lý", 10,
+                        "forbidden other technician update", "tech01", "", null)));
+        check(Protocol.STATUS_ERROR.equals(unassignedTechUpdate.status),
+                "F05 rejects progress updates from technicians not assigned to the ticket");
         byte[] fileBytes = "final acceptance result".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         String storedFileName = null;
         try {
@@ -381,6 +403,7 @@ public final class NetworkIntegrationTests {
         String ticketId = "YC-2026-TEST-ADMIN";
         Models.Ticket fixture = new Models.Ticket(ticketId, "Admin test ticket", "IT", "Thấp",
                 "2026-10-26", "Mới", "user02", "Chưa phân công", "test fixture", 0, "");
+        fixture.createdAt = java.time.LocalDateTime.now().withNano(0).toString();
         check(db.insertTicket(fixture), "admin operation ticket fixture is stored");
 
         Protocol.Packet denied = requester.request(new Protocol.Packet(Protocol.CMD_UPDATE_TICKET, "", "",
@@ -392,7 +415,34 @@ public final class NetworkIntegrationTests {
         Protocol.Packet update = admin.request(new Protocol.Packet(Protocol.CMD_UPDATE_TICKET, "", "",
                 new AdminTicketManagement.UpdateRequest(ticketId, "Edited by admin", "IT", "Cao", "updated")));
         check(Protocol.STATUS_SUCCESS.equals(update.status), "admin can edit ticket fields");
-        check("Edited by admin".equals(db.getTicketById(ticketId).title), "admin changes persist");
+        Models.Ticket updatedTicket = db.getTicketById(ticketId);
+        check("Edited by admin".equals(updatedTicket.title), "admin changes persist");
+        java.time.LocalDateTime createdAt = java.time.LocalDateTime.parse(updatedTicket.createdAt);
+        check("Cao".equals(updatedTicket.priority)
+                        && java.time.LocalDateTime.parse(updatedTicket.slaDueAt)
+                        .equals(BusinessHours.addWorkingHours(createdAt, 8)),
+                "changing priority to high recalculates SLA using 8 working hours from ticket creation");
+        check(requester.readNotificationEvent("TICKET_UPDATED")
+                        && technician.readNotificationEvent("TICKET_UPDATED")
+                        && admin.readNotificationEvent("TICKET_UPDATED"),
+                "ticket priority updates notify requester, technician, and admin clients");
+
+        for (String[] priorityAndHours : new String[][]{
+                {"Bình thường", "24"}, {"Thấp", "48"}, {"Khẩn cấp", "4"}
+        }) {
+            Protocol.Packet priorityUpdate = admin.request(new Protocol.Packet(Protocol.CMD_UPDATE_TICKET, "", "",
+                    new AdminTicketManagement.UpdateRequest(ticketId, "Edited by admin", "IT",
+                            priorityAndHours[0], "updated")));
+            Models.Ticket recalculated = db.getTicketById(ticketId);
+            check(Protocol.STATUS_SUCCESS.equals(priorityUpdate.status)
+                            && java.time.LocalDateTime.parse(recalculated.slaDueAt)
+                            .equals(BusinessHours.addWorkingHours(createdAt,
+                                    Double.parseDouble(priorityAndHours[1]))),
+                    "admin priority change recalculates SLA for " + priorityAndHours[0]);
+            requester.readNotificationEvent("TICKET_UPDATED");
+            technician.readNotificationEvent("TICKET_UPDATED");
+            admin.readNotificationEvent("TICKET_UPDATED");
+        }
 
         Protocol.Packet deniedDelete = requester.request(new Protocol.Packet(Protocol.CMD_DELETE_TICKET, "", "",
                 new AdminTicketManagement.DeleteRequest(ticketId)));
@@ -412,17 +462,41 @@ public final class NetworkIntegrationTests {
                 "audit history records ticket soft deletion");
     }
 
-    private static void testChatAttachment(TestClient requester, TestClient technician) throws Exception {
+    private static void testChatAttachment(TestClient requester, TestClient technician,
+                                           TestClient admin) throws Exception {
         byte[] png = java.util.Base64.getDecoder().decode(
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p0cAAAAASUVORK5CYII=");
+        Protocol.Packet textSent = requester.request(new Protocol.Packet(Protocol.CMD_SEND_TICKET_CHAT, "", "",
+                new F11_TicketChat.ChatRequest(TICKET_ID, "realtime message for online admin")));
+        check(Protocol.STATUS_SUCCESS.equals(textSent.status), "authorized user sends a chat message");
+        Models.NotificationMessage adminTextNotification = admin.readNotificationMessage(
+                TICKET_ID, "TICKET_CHAT_MESSAGE");
+        check(adminTextNotification != null
+                        && adminTextNotification.message.contains("realtime message for online admin"),
+                "online admin receives real-time chat messages");
+        check(requester.readNotificationMessage(TICKET_ID, "TICKET_CHAT_MESSAGE") != null
+                        && technician.readNotificationMessage(TICKET_ID, "TICKET_CHAT_MESSAGE") != null,
+                "chat messages are pushed to connected participants");
+
         Protocol.Packet rejected = requester.request(new Protocol.Packet(Protocol.CMD_SEND_TICKET_CHAT, "", "",
                 new F11_TicketChat.ChatAttachmentRequest(TICKET_ID, "payload.exe", "", png)));
         check(Protocol.STATUS_ERROR.equals(rejected.status), "chat rejects unsupported attachment types");
         Protocol.Packet sent = requester.request(new Protocol.Packet(Protocol.CMD_SEND_TICKET_CHAT, "", "",
                 new F11_TicketChat.ChatAttachmentRequest(TICKET_ID, "sample.png", "integration attachment", png)));
         check(Protocol.STATUS_SUCCESS.equals(sent.status), "authorized user sends an image through chat");
-        check(requester.readNotification(TICKET_ID) && technician.readNotification(TICKET_ID),
-                "chat attachment is pushed to connected participants");
+        Models.NotificationMessage adminAttachmentNotification = admin.readNotificationMessage(
+                TICKET_ID, "TICKET_CHAT_MESSAGE");
+        check(adminAttachmentNotification != null && adminAttachmentNotification.attachmentMessageId > 0
+                        && "sample.png".equals(adminAttachmentNotification.attachmentName),
+                "online admin receives chat attachment metadata in real time");
+        Models.NotificationMessage requesterAttachmentNotification = requester.readNotificationMessage(
+                TICKET_ID, "TICKET_CHAT_MESSAGE");
+        Models.NotificationMessage technicianAttachmentNotification = technician.readNotificationMessage(
+                TICKET_ID, "TICKET_CHAT_MESSAGE");
+        check(requesterAttachmentNotification != null && requesterAttachmentNotification.attachmentMessageId > 0
+                        && technicianAttachmentNotification != null
+                        && technicianAttachmentNotification.attachmentMessageId > 0,
+                "chat attachments are pushed to connected participants");
 
         Protocol.Packet history = technician.request(new Protocol.Packet(Protocol.CMD_GET_TICKET_CHAT, "", "",
                 new F11_TicketChat.ChatRequest(TICKET_ID, "")));
@@ -700,8 +774,14 @@ public final class NetworkIntegrationTests {
         }
 
         private synchronized Models.NotificationMessage readNotificationMessage(String ticketId) throws Exception {
+            return readNotificationMessage(ticketId, null);
+        }
+
+        private synchronized Models.NotificationMessage readNotificationMessage(String ticketId,
+                                                                                 String eventType) throws Exception {
             Models.NotificationMessage pending = pendingNotifications.stream()
-                    .filter(notification -> ticketId.equals(notification.ticketId))
+                    .filter(notification -> ticketId.equals(notification.ticketId)
+                            && (eventType == null || eventType.equals(notification.eventType)))
                     .findFirst().orElse(null);
             if (pending != null) {
                 pendingNotifications.remove(pending);
@@ -714,7 +794,13 @@ public final class NetworkIntegrationTests {
                 if (received instanceof Protocol.Packet packet
                         && Protocol.CMD_NOTIFICATION.equals(packet.command)
                         && packet.data instanceof Models.NotificationMessage notification
-                        && ticketId.equals(notification.ticketId)) return notification;
+                        && ticketId.equals(notification.ticketId)
+                        && (eventType == null || eventType.equals(notification.eventType))) return notification;
+                if (received instanceof Protocol.Packet packet
+                        && Protocol.CMD_NOTIFICATION.equals(packet.command)
+                        && packet.data instanceof Models.NotificationMessage notification) {
+                    pendingNotifications.offer(notification);
+                }
             }
             return null;
         }

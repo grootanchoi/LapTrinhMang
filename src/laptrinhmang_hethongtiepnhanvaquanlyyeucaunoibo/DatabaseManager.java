@@ -151,6 +151,7 @@ public class DatabaseManager {
         ensureColumn(conn, "created_at", "DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'");
         ensureColumn(conn, "owner_department", "VARCHAR(100) NOT NULL DEFAULT ''");
         ensureColumn(conn, "source_ip", "VARCHAR(45) NOT NULL DEFAULT ''");
+        ensureColumn(conn, "device", "VARCHAR(100) NOT NULL DEFAULT ''");
         try (Statement statement = conn.createStatement()) {
             statement.executeUpdate("UPDATE tickets SET created_at = COALESCE("
                     + "STR_TO_DATE(CONCAT(created_date, ' 08:00:00'), '%Y-%m-%d %H:%i:%s'), "
@@ -362,6 +363,7 @@ public class DatabaseManager {
     }
 
     private void prepareTicketForInsert(Models.Ticket ticket) {
+        if (ticket.device == null) ticket.device = "";
         if (ticket.createdAt == null || ticket.createdAt.isBlank()) {
             ticket.createdAt = LocalDateTime.now().format(TICKET_DATE_TIME_FORMAT);
         }
@@ -390,8 +392,8 @@ public class DatabaseManager {
 
     private static String ticketInsertSql() {
         return "INSERT INTO tickets (id, title, category, priority, created_date, created_at, status, owner, "
-                + "assigned_tech, detail, progress, attachment_name, sla_due_at, owner_department, source_ip) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                + "assigned_tech, detail, progress, attachment_name, sla_due_at, owner_department, source_ip, device) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     }
 
     private static void bindTicketInsert(PreparedStatement ps, Models.Ticket ticket) throws SQLException {
@@ -410,6 +412,7 @@ public class DatabaseManager {
         ps.setTimestamp(13, Timestamp.valueOf(LocalDateTime.parse(ticket.slaDueAt)));
         ps.setString(14, ticket.ownerDepartment == null ? "" : ticket.ownerDepartment);
         ps.setString(15, ticket.sourceIp == null ? "" : ticket.sourceIp);
+        ps.setString(16, ticket.device == null ? "" : ticket.device);
     }
 
     // ==================== F03: XEM DANH SÁCH & CHI TIẾT ====================
@@ -552,6 +555,7 @@ public class DatabaseManager {
         ticket.latestNote = rs.getString("latest_note");
         ticket.ownerDepartment = rs.getString("owner_department");
         ticket.sourceIp = rs.getString("source_ip");
+        ticket.device = rs.getString("device");
         return ticket;
     }
 
@@ -567,8 +571,11 @@ public class DatabaseManager {
                 + "; priority=" + previous.priority;
         boolean priorityChanged = previous.priority == null
                 || !previous.priority.equalsIgnoreCase(updated.priority);
+        LocalDateTime slaStart = priorityChanged ? ticketCreatedAt(previous) : null;
         String dueAt = priorityChanged
-                ? BusinessHours.addWorkingHours(LocalDateTime.now(), slaHours(updated.priority)).toString()
+                ? BusinessHours.addWorkingHours(
+                        slaStart == null ? LocalDateTime.now() : slaStart,
+                        slaHours(updated.priority)).toString()
                 : previous.slaDueAt;
         if (useMySQL) {
             String sql = "UPDATE tickets SET title = ?, category = ?, priority = ?, detail = ?, sla_due_at = ?, "
@@ -716,9 +723,9 @@ public class DatabaseManager {
 
     private static double slaHours(String priority) {
         if ("Khẩn cấp".equalsIgnoreCase(priority)) return 4;
-        if ("Cao".equalsIgnoreCase(priority)) return 24;
-        if ("Thấp".equalsIgnoreCase(priority)) return 120;
-        return 72;
+        if ("Cao".equalsIgnoreCase(priority)) return 8;
+        if ("Thấp".equalsIgnoreCase(priority)) return 48;
+        return 24;
     }
 
     // F10: lấy timeline và upsert đánh giá một lần cho mỗi yêu cầu.

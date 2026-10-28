@@ -69,12 +69,7 @@ Quản trị viên là vai trò duy nhất được tạo tài khoản và gán 
 - Mỗi tài khoản requester được tạo tối đa **5 ticket trong 24 giờ gần nhất**. Ticket đã xóa mềm vẫn tính vào giới hạn. Server kiểm tra quota khi lưu, không dựa vào dữ liệu do client gửi.
 - Admin gán phòng ban khi tạo/sửa tài khoản trong F08. Ticket lưu ảnh chụp phòng ban tại thời điểm gửi; requester chưa có phòng ban sẽ không thể tạo ticket cho đến khi admin cập nhật hồ sơ.
 - IP nguồn được lấy từ socket phía server, lưu cùng ticket và hiển thị trong màn hình chi tiết cho admin. Nếu kết nối đi qua NAT/VPN, server ghi địa chỉ nguồn mà nó thực sự nhìn thấy (có thể là IP gateway).
-- Chỉ IP thuộc CIDR cấu hình mới kết nối được tới server. Trước khi chạy server trên LAN, cấu hình các subnet nội bộ được phép trong Command Prompt:
-  ```bat
-  set WORKDESK_ALLOWED_CIDRS=192.168.10.0/24,10.20.0.0/16
-  run.bat
-  ```
-  Thay các ví dụ bằng CIDR thực tế của mạng nội bộ. Nếu biến môi trường chưa đặt, mặc định chỉ được phép kết nối từ localhost. Các client qua Wi-Fi/VLAN khác chỉ hoạt động nếu subnet của họ cũng nằm trong danh sách.
+- Server tự động cho phép địa chỉ IPv4 nội bộ (`10.x.x.x`, `172.16.x.x` đến `172.31.x.x`, `192.168.x.x`) và IPv6 ULA/loopback; không cần cấu hình CIDR. Các client trong mạng LAN/VPN riêng có thể kết nối nếu Windows Firewall cho phép cổng TCP của server (mặc định `8888`). Địa chỉ IP công cộng bị từ chối, vì vậy không mở cổng server trực tiếp ra Internet.
 - Ứng dụng tự thêm các cột dữ liệu mới khi kết nối MySQL; tài khoản CSDL cần quyền `ALTER TABLE`. Với dữ liệu cũ, admin cần cập nhật phòng ban cho các requester hiện có.
 
 ### 4.4 Phiên đăng nhập và phân công kỹ thuật viên
@@ -121,7 +116,7 @@ Tài khoản được tạo bởi `schema.sql` dùng các mật khẩu ở bản
 ### 4.9 Nhật ký kiểm toán, sửa/xóa yêu cầu và SLA
 - Chỉ admin thấy **Quản lý tài khoản**, **Nhật ký kiểm toán**, **Sửa yêu cầu** và **Xóa yêu cầu**. Nhật ký hiển thị tối đa 500 sự kiện gần nhất như đăng nhập, tạo/sửa/xóa yêu cầu, phân công, cập nhật trạng thái, quản lý tài khoản, chat và cảnh báo SLA.
 - Xóa yêu cầu là **xóa mềm**: yêu cầu biến khỏi danh sách làm việc nhưng giữ lịch sử kiểm toán và dữ liệu trò chuyện trong cơ sở dữ liệu. Admin có thể sửa tiêu đề, danh mục, mức ưu tiên và mô tả; đổi mức ưu tiên sẽ tính lại hạn SLA.
-- SLA tính theo lịch thứ Hai–thứ Sáu, 08:00–17:00, chưa loại trừ ngày lễ. Hạn mặc định: Khẩn cấp 4 giờ làm việc; Cao 24; Bình thường 72; Thấp 120. Server cảnh báo trước hạn tối đa 1 giờ làm việc và gửi cảnh báo khi quá hạn; cảnh báo một lần cho mỗi trạng thái/cấu hình SLA.
+- SLA tính theo lịch thứ Hai–thứ Sáu, 08:00–17:00, chưa loại trừ ngày lễ. Hạn mặc định: Khẩn cấp 4 giờ làm việc; Cao 8; Bình thường 24; Thấp 48. Khi admin đổi mức ưu tiên, hạn được tính lại từ thời điểm tạo ticket theo mức mới. Server cảnh báo trước hạn tối đa 1 giờ làm việc và gửi cảnh báo khi quá hạn; cảnh báo một lần cho mỗi trạng thái/cấu hình SLA.
 - Client không còn thanh tiến độ truyền tệp ở góc dưới bên phải. Tiến độ xử lý yêu cầu vẫn hiển thị trong bảng và chức năng F05.
 
 ### 4.10 Giao diện WorkDesk Client

@@ -2,6 +2,7 @@ package laptrinhmang_hethongtiepnhanvaquanlyyeucaunoibo;
 
 import java.io.Serializable;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -102,11 +103,7 @@ public class F11_TicketChat {
         }
 
         String displayMessage = saved.sentAt + " | " + saved.sender + ": " + saved.content;
-        if (broadcaster != null) {
-            broadcaster.sendToUsers(
-                    List.of(ticket.owner, ticket.assignedTech, user.username),
-                    "TICKET_CHAT_MESSAGE", ticket.id, displayMessage);
-        }
+        broadcastChatMessage(broadcaster, ticket, user, displayMessage, 0, null);
         db.recordAuditEvent("CHAT_MESSAGE_SENT", ticket.id, user.username, "Gửi tin nhắn F11.");
         return Protocol.Packet.success(Protocol.CMD_SEND_TICKET_CHAT, "Đã gửi tin nhắn.", saved);
     }
@@ -175,10 +172,7 @@ public class F11_TicketChat {
 
         String displayMessage = saved.sentAt + " | " + saved.sender + ": " + saved.content
                 + " [Tệp: " + cleanName + "]";
-        if (broadcaster != null) {
-            broadcaster.sendToUsers(List.of(ticket.owner, ticket.assignedTech, user.username),
-                    "TICKET_CHAT_MESSAGE", ticket.id, displayMessage, saved.id, cleanName);
-        }
+        broadcastChatMessage(broadcaster, ticket, user, displayMessage, saved.id, cleanName);
         DatabaseManager.getInstance().recordAuditEvent("CHAT_ATTACHMENT_SENT", ticket.id, user.username,
                 "Gửi tệp chat " + cleanName + " (" + request.fileBytes.length + " byte).");
         return Protocol.Packet.success(Protocol.CMD_SEND_TICKET_CHAT, "Đã gửi tệp đính kèm.", saved);
@@ -239,5 +233,23 @@ public class F11_TicketChat {
                 && user.username.equalsIgnoreCase(ticket.owner))
                 || ("tech".equalsIgnoreCase(user.role)
                 && user.username.equalsIgnoreCase(ticket.assignedTech));
+    }
+
+    private static void broadcastChatMessage(F06_NotificationBroadcaster broadcaster, Models.Ticket ticket,
+                                             Models.User sender, String message, long attachmentMessageId,
+                                             String attachmentName) {
+        if (broadcaster == null) return;
+        List<String> recipients = new ArrayList<>();
+        if (ticket.owner != null) recipients.add(ticket.owner);
+        if (ticket.assignedTech != null) recipients.add(ticket.assignedTech);
+        if ("admin".equalsIgnoreCase(sender.role) && sender.username != null) {
+            recipients.removeIf(username -> sender.username.equalsIgnoreCase(username));
+        } else if (sender.username != null) {
+            recipients.add(sender.username);
+        }
+        broadcaster.sendToUsers(recipients, "TICKET_CHAT_MESSAGE", ticket.id, message,
+                attachmentMessageId, attachmentName);
+        broadcaster.sendToRole("admin", "TICKET_CHAT_MESSAGE", ticket.id, message,
+                attachmentMessageId, attachmentName);
     }
 }
