@@ -235,7 +235,9 @@ public class F11_TicketChat {
     private static boolean canAccess(Models.Ticket ticket, Models.User user) {
         if (ticket == null || user == null) return false;
         return "admin".equalsIgnoreCase(user.role)
-                || user.username.equalsIgnoreCase(ticket.owner)
-                || user.username.equalsIgnoreCase(ticket.assignedTech);
+                || ("requester".equalsIgnoreCase(user.role)
+                && user.username.equalsIgnoreCase(ticket.owner))
+                || ("tech".equalsIgnoreCase(user.role)
+                && user.username.equalsIgnoreCase(ticket.assignedTech));
     }
 }

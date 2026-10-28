@@ -69,7 +69,8 @@ public class F01_Authentication {
         }
 
         // Đăng nhập thành công, trả về thông tin người dùng và vai trò
-        Models.User sanitizedUser = new Models.User(user.username, "", user.displayName, user.role, user.status);
+        Models.User sanitizedUser = new Models.User(user.username, "", user.displayName, user.role, user.status,
+                user.department);
         LoginResponse responseData = new LoginResponse(true, "Đăng nhập thành công!", sanitizedUser);
         return Protocol.Packet.success(Protocol.CMD_LOGIN, "Xác thực thành công.", responseData);
     }
@@ -102,6 +103,7 @@ public class F01_Authentication {
             // Đóng gói gói tin F01
             LoginRequest req = new LoginRequest(username, password);
             Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_LOGIN, "", "", req);
+            packet.correlationId = java.util.UUID.randomUUID().toString();
 
             // Gửi qua TCP Socket
             out.writeObject(packet);

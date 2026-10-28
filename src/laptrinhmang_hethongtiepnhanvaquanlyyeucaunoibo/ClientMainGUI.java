@@ -2,13 +2,8 @@ package laptrinhmang_hethongtiepnhanvaquanlyyeucaunoibo;
 
 import java.awt.*;
 import java.io.*;
-import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.LineBorder;
@@ -27,31 +22,47 @@ public class ClientMainGUI {
     private static final Color CARD_BG = Color.WHITE;
     private static final Color TEXT_DARK = new Color(33, 43, 54);
     private static final Color GREEN = new Color(34, 160, 88);
+    private static final Color AMBER = new Color(217, 119, 6);
+    private static final Color BORDER = new Color(226, 232, 240);
 
     private JFrame mainFrame;
-    private volatile Socket clientSocket;
-    private volatile ObjectOutputStream out;
-    private volatile ObjectInputStream in;
-
-    private Models.User currentUser;
+    private NetworkService networkService;
     private String serverHost = "127.0.0.1";
     private int serverPort = 8888;
-    private volatile boolean isListening = false;
-    private final java.util.concurrent.atomic.AtomicBoolean isReconnecting =
-            new java.util.concurrent.atomic.AtomicBoolean();
-    private char[] reconnectPassword;
-    private java.util.concurrent.ScheduledExecutorService heartbeatExecutor;
-    private final java.util.Map<String, BlockingQueue<Protocol.Packet>> responseQueues = new ConcurrentHashMap<>();
-    private final java.util.Map<String, Object> commandLocks = new ConcurrentHashMap<>();
-    private final java.util.Map<String, JPanel> openTicketChats = new ConcurrentHashMap<>();
-    private final java.util.Map<String, List<PendingChatEvent>> pendingTicketChatMessages = new ConcurrentHashMap<>();
-    private final java.util.Set<String> loadingTicketChats = ConcurrentHashMap.newKeySet();
-    private final java.util.Map<String, Integer> unreadChatCounts = new ConcurrentHashMap<>();
+    private Models.User currentUser;
+    private final java.util.Map<String, JPanel> openTicketChats = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<String, List<PendingChatEvent>> pendingTicketChatMessages = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Set<String> loadingTicketChats = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.Map<String, Integer> unreadChatCounts = new java.util.concurrent.ConcurrentHashMap<>();
 
     // Bảng dữ liệu và cache
     private DefaultTableModel ticketTableModel;
+    private JTable ticketTable;
     private List<Models.Ticket> cachedTickets = new ArrayList<>();
     private JLabel statusConnectionLabel;
+    private JLabel footerConnectionDot;
+    private JLabel footerConnectionText;
+    private JLabel footerSecurityBadge;
+    private JLabel footerIdentity;
+    private JLabel footerLatency;
+    private JLabel toastMessage;
+    private JPanel toastContainer;
+    private Timer networkStatusTimer;
+    private Timer toastTimer;
+    private JLabel inspectorId;
+    private JTextArea inspectorTitle;
+    private JLabel inspectorOwner;
+    private JLabel inspectorDepartment;
+    private JLabel inspectorSourceIp;
+    private JLabel inspectorCreatedAt;
+    private JLabel inspectorSla;
+    private JLabel inspectorLatestNote;
+    private JProgressBar inspectorProgress;
+    private JPanel inspectorChatHost;
+    private String inspectorChatTicketId;
+    private final java.util.Map<String, JPanel> inspectorTicketChats =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private boolean statusDotVisible = true;
 
     private static final class PendingChatEvent {
         private final String message;
@@ -109,8 +120,8 @@ public class ClientMainGUI {
         // Cấu hình IP và Port (Đầu vào F01)
         JPanel netPanel = new JPanel(new GridLayout(1, 2, 10, 0));
         netPanel.setOpaque(false);
-        JTextField txtHost = new JTextField(serverHost);
-        JTextField txtPort = new JTextField(String.valueOf(serverPort));
+        JTextField txtHost = new JTextField("127.0.0.1");
+        JTextField txtPort = new JTextField("8888");
         JPanel hostBox = new JPanel(new BorderLayout(0, 4)); hostBox.setOpaque(false);
         hostBox.add(new JLabel("Máy chủ IP:"), BorderLayout.NORTH); hostBox.add(txtHost, BorderLayout.CENTER);
         JPanel portBox = new JPanel(new BorderLayout(0, 4)); portBox.setOpaque(false);
@@ -165,6 +176,8 @@ public class ClientMainGUI {
             }
             String username = txtUser.getText().trim();
             String password = new String(txtPass.getPassword());
+            serverHost = host;
+            serverPort = port;
 
             statusConnectionLabel.setText("Đang kết nối đến " + host + ":" + port + "...");
             statusConnectionLabel.setForeground(BLUE);
@@ -172,20 +185,22 @@ public class ClientMainGUI {
             // Thực hiện F01 qua TCP Socket
             F01_Authentication.ConnectionResult res = F01_Authentication.performLogin(host, port, username, password);
             if (res.isConnected) {
-                this.serverHost = host;
-                this.serverPort = port;
-                this.clientSocket = res.socket;
-                this.out = res.out;
-                this.in = res.in;
                 this.currentUser = res.loggedInUser;
-                this.reconnectPassword = password.toCharArray();
-
+                this.networkService = new NetworkService(this::handleNetworkPacket,
+                        this::handleNetworkDisconnect, this::handleNetworkReconnected);
+                this.networkService.setReconnectCredentials(host, port, username, password);
+                try {
+                    this.networkService.connect(res.socket, res.in, res.out);
+                } catch (IOException ex) {
+                    this.networkService.close();
+                    this.networkService = null;
+                    this.currentUser = null;
+                    JOptionPane.showMessageDialog(mainFrame, ex.getMessage(), "Lỗi kết nối",
+                            JOptionPane.ERROR_MESSAGE);
+                    return;
+                }
                 statusConnectionLabel.setText("Kết nối thành công!");
                 statusConnectionLabel.setForeground(GREEN);
-
-                // Khởi động luồng nền lắng nghe thông báo thời gian thực F06
-                startNotificationListener();
-                startHeartbeat();
 
                 // Hiển thị giao diện điều khiển chính
                 showDashboard();
@@ -203,133 +218,63 @@ public class ClientMainGUI {
         mainFrame.setVisible(true);
     }
 
-    // =========================================================================
-    // F06: LUỒNG LẮNG NGHE THÔNG BÁO THỜI GIAN THỰC (MULTI-SOCKET NOTIFICATION)
-    // =========================================================================
-    private void startNotificationListener() {
-        if (isListening) return;
-        isListening = true;
-
-        Thread listenerThread = new Thread(() -> {
-            try {
-                while (isListening && clientSocket != null && !clientSocket.isClosed()) {
-                    Object obj = in.readObject();
-                    if (obj instanceof Protocol.Packet packet) {
-                        if (Protocol.CMD_NOTIFICATION.equals(packet.command)) {
-                            // Nhận thông báo phát sóng từ Server (F06)
-                            Models.NotificationMessage notif = (Models.NotificationMessage) packet.data;
-                            SwingUtilities.invokeLater(() -> {
-                                if ("TICKET_CHAT_MESSAGE".equals(notif.eventType)) {
-                                    appendTicketChatMessage(notif.ticketId, notif.message,
-                                            notif.attachmentMessageId, notif.attachmentName);
-                                    if (openTicketChats.containsKey(notif.ticketId)) {
-                                        markChatRead(notif.ticketId);
-                                    } else {
-                                        refreshChatUnreadCounts();
-                                    }
-                                }
-                                // Tự động làm mới danh sách yêu cầu (F03)
-                                requestTicketList();
-
-                                // Hiển thị thông báo
-                                if (!"TICKET_CHAT_MESSAGE".equals(notif.eventType)
-                                        || !openTicketChats.containsKey(notif.ticketId)) {
-                                    showToastNotification("THÔNG BÁO HỆ THỐNG (" + notif.timestamp + ")\n" + notif.message);
-                                }
-                            });
-                        } else if (Protocol.CMD_GET_TICKETS.equals(packet.command)) {
-                            if (Protocol.STATUS_SUCCESS.equals(packet.status) && packet.data instanceof List<?>) {
-                                @SuppressWarnings("unchecked") List<Models.Ticket> rows = (List<Models.Ticket>) packet.data;
-                                SwingUtilities.invokeLater(() -> displayTickets(rows));
-                            }
-                            responseQueues.computeIfAbsent(packet.command, k -> new LinkedBlockingQueue<>()).offer(packet);
-                        } else {
-                            responseQueues.computeIfAbsent(packet.command, k -> new LinkedBlockingQueue<>()).offer(packet);
-                        }
+    private void handleNetworkPacket(Protocol.Packet packet) {
+        if (!(packet.data instanceof Models.NotificationMessage notification)) return;
+        if (!"SESSION_REVOKED".equals(notification.eventType)) {
+            SwingUtilities.invokeLater(() -> {
+                if ("TICKET_CHAT_MESSAGE".equals(notification.eventType)) {
+                    appendTicketChatMessage(notification.ticketId, notification.message,
+                            notification.attachmentMessageId, notification.attachmentName);
+                    if (openTicketChats.containsKey(notification.ticketId)
+                            || inspectorTicketChats.containsKey(notification.ticketId)) {
+                        markChatRead(notification.ticketId);
+                    } else {
+                        refreshChatUnreadCounts();
                     }
                 }
-            } catch (Exception e) {
-                if (isListening && currentUser != null) {
-                    System.err.println("[Client] Mất kết nối tới Server: " + e.getMessage());
-                    isListening = false;
-                    beginReconnect();
-                }
-            }
-        });
-        listenerThread.setDaemon(true);
-        listenerThread.start();
-    }
-
-    private void startHeartbeat() {
-        if (heartbeatExecutor != null && !heartbeatExecutor.isShutdown()) return;
-        heartbeatExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "workdesk-heartbeat");
-            thread.setDaemon(true);
-            return thread;
-        });
-        heartbeatExecutor.scheduleWithFixedDelay(() -> {
-            if (currentUser == null || isReconnecting.get() || clientSocket == null || clientSocket.isClosed()) return;
-            try {
-                Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(Protocol.CMD_PING, "", "", null));
-                if (!Protocol.STATUS_SUCCESS.equals(response.status)) throw new IOException("Server heartbeat rejected.");
-            } catch (Exception e) {
-                System.err.println("[Client] Heartbeat thất bại: " + e.getMessage());
-                beginReconnect();
-            }
-        }, 15, 15, TimeUnit.SECONDS);
-    }
-
-    private void beginReconnect() {
-        if (currentUser == null || !isReconnecting.compareAndSet(false, true)) return;
-        SwingUtilities.invokeLater(() -> {
-            if (mainFrame != null) mainFrame.setTitle("WorkDesk | Đang mất kết nối - tự động kết nối lại...");
-        });
-        Thread reconnectThread = new Thread(() -> {
-            long delaySeconds = 1;
-            while (currentUser != null && isReconnecting.get()) {
-                try {
-                    Thread.sleep(TimeUnit.SECONDS.toMillis(delaySeconds));
-                    String password = reconnectPassword == null ? "" : new String(reconnectPassword);
-                    F01_Authentication.ConnectionResult result = F01_Authentication.performLogin(
-                            serverHost, serverPort, currentUser.username, password);
-                    if (!result.isConnected) {
-                        System.err.println("[Client] Kết nối lại chưa thành công: " + result.statusMessage);
-                        delaySeconds = Math.min(delaySeconds * 2, 30);
-                        continue;
-                    }
-                    Socket previousSocket = clientSocket;
-                    isListening = false;
-                    clientSocket = result.socket;
-                    out = result.out;
-                    in = result.in;
-                    currentUser = result.loggedInUser;
-                    responseQueues.values().forEach(BlockingQueue::clear);
-                    if (previousSocket != null && !previousSocket.isClosed()) previousSocket.close();
-                    isListening = false;
-                    isReconnecting.set(false);
-                    SwingUtilities.invokeLater(() -> {
-                        if (mainFrame != null) {
-                            mainFrame.setTitle("WorkDesk | Đã kết nối lại - [" + currentUser.getRoleName() + "]");
-                        }
-                    });
-                    startNotificationListener();
+                if ("TICKET_CREATED".equals(notification.eventType)
+                        || "STATUS_CHANGED".equals(notification.eventType)
+                        || "TICKET_ASSIGNED".equals(notification.eventType)) {
                     requestTicketList();
-                    refreshChatUnreadCounts();
-                    reloadOpenChatHistories();
-                    System.out.println("[Client] Đã kết nối lại tới Server.");
-                    return;
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (Exception e) {
-                    System.err.println("[Client] Lỗi trong quá trình tự kết nối lại: " + e.getMessage());
-                    delaySeconds = Math.min(delaySeconds * 2, 30);
                 }
+                if (!"TICKET_CHAT_MESSAGE".equals(notification.eventType)
+                        || !openTicketChats.containsKey(notification.ticketId)) {
+                    showToastNotification("THÔNG BÁO HỆ THỐNG (" + notification.timestamp + ")\n"
+                            + notification.message);
+                }
+            });
+            return;
+        }
+
+        SwingUtilities.invokeLater(() -> {
+            logout();
+            JOptionPane.showMessageDialog(mainFrame, notification.message,
+                    "Phiên đăng nhập đã kết thúc", JOptionPane.WARNING_MESSAGE);
+        });
+    }
+
+    private void handleNetworkDisconnect(Exception cause) {
+        SwingUtilities.invokeLater(() -> {
+            if (mainFrame != null) {
+                mainFrame.setTitle("WorkDesk | Đang mất kết nối - tự động kết nối lại...");
+                refreshNetworkStatusBar();
             }
-            isReconnecting.set(false);
-        }, "workdesk-reconnect");
-        reconnectThread.setDaemon(true);
-        reconnectThread.start();
+        });
+        System.err.println("[Client] Mất kết nối tới Server: " + cause.getMessage());
+    }
+
+    private void handleNetworkReconnected(Models.User user) {
+        SwingUtilities.invokeLater(() -> {
+            currentUser = user;
+            if (mainFrame != null) {
+                mainFrame.setTitle("WorkDesk | Đã kết nối lại - [" + currentUser.getRoleName() + "]");
+            }
+            refreshNetworkStatusBar();
+            requestTicketList();
+            refreshChatUnreadCounts();
+            reloadOpenChatHistories();
+        });
+        System.out.println("[Client] Đã kết nối lại tới Server.");
     }
 
     private void reloadOpenChatHistories() {
@@ -364,7 +309,130 @@ public class ClientMainGUI {
     }
 
     private void showToastNotification(String message) {
-        JOptionPane.showMessageDialog(mainFrame, message, "Thông báo thời gian thực (F06)", JOptionPane.INFORMATION_MESSAGE);
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> showToastNotification(message));
+            return;
+        }
+        if (toastMessage == null || toastContainer == null) return;
+        toastMessage.setText("<html><b>WorkDesk</b>&nbsp;&nbsp;" + escapeHtml(message).replace("\n", "<br>") + "</html>");
+        toastMessage.setForeground(TEXT_DARK);
+        toastContainer.setBackground(new Color(239, 246, 255));
+        toastContainer.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(new Color(147, 197, 253)),
+                new EmptyBorder(10, 14, 10, 14)));
+        toastContainer.setVisible(true);
+        toastContainer.revalidate();
+        if (toastTimer != null) toastTimer.stop();
+        toastTimer = new Timer(120, null);
+        final int[] fadeStep = {0};
+        toastTimer.addActionListener(event -> {
+            fadeStep[0]++;
+            if (fadeStep[0] < 6) {
+                int component = 239 + (fadeStep[0] * 16 / 6);
+                toastContainer.setBackground(new Color(component, component, component));
+            } else {
+                toastTimer.stop();
+                toastContainer.setVisible(false);
+            }
+        });
+        toastTimer.setInitialDelay(3600);
+        toastTimer.start();
+    }
+
+    private JPanel createNetworkFooter() {
+        JPanel footer = new JPanel(new BorderLayout(12, 0));
+        footer.setBackground(Color.WHITE);
+        footer.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(1, 0, 0, 0, BORDER),
+                new EmptyBorder(7, 18, 7, 18)));
+
+        JPanel connection = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        connection.setOpaque(false);
+        footerConnectionDot = new JLabel("●");
+        footerConnectionDot.setFont(new Font("Segoe UI", Font.BOLD, 13));
+        footerConnectionText = new JLabel("Đang kiểm tra kết nối...");
+        footerConnectionText.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        connection.add(footerConnectionDot);
+        connection.add(footerConnectionText);
+
+        footerSecurityBadge = new JLabel();
+        footerSecurityBadge.setOpaque(true);
+        footerSecurityBadge.setBorder(new EmptyBorder(3, 8, 3, 8));
+        footerSecurityBadge.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        footerSecurityBadge.setForeground(new Color(21, 101, 69));
+        footerSecurityBadge.setBackground(new Color(220, 252, 231));
+
+        footerIdentity = new JLabel();
+        footerIdentity.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        footerIdentity.setForeground(TEXT_DARK);
+        footerLatency = new JLabel("Heartbeat: chờ đo");
+        footerLatency.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        footerLatency.setForeground(new Color(71, 85, 105));
+
+        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 14, 0));
+        right.setOpaque(false);
+        right.add(footerSecurityBadge);
+        right.add(footerIdentity);
+        right.add(footerLatency);
+        footer.add(connection, BorderLayout.WEST);
+        footer.add(right, BorderLayout.EAST);
+
+        toastMessage = new JLabel();
+        toastMessage.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        toastContainer = new JPanel(new BorderLayout());
+        toastContainer.setOpaque(true);
+        toastContainer.setVisible(false);
+        toastContainer.add(toastMessage, BorderLayout.CENTER);
+
+        JPanel bottom = new JPanel(new BorderLayout(0, 4));
+        bottom.setOpaque(false);
+        JPanel toastRow = new JPanel(new FlowLayout(FlowLayout.RIGHT, 18, 0));
+        toastRow.setOpaque(false);
+        toastRow.add(toastContainer);
+        bottom.add(toastRow, BorderLayout.CENTER);
+        bottom.add(footer, BorderLayout.SOUTH);
+
+        if (networkStatusTimer != null) networkStatusTimer.stop();
+        networkStatusTimer = new Timer(500, event -> {
+            statusDotVisible = !statusDotVisible;
+            refreshNetworkStatusBar();
+        });
+        networkStatusTimer.start();
+        refreshNetworkStatusBar();
+        return bottom;
+    }
+
+    private void refreshNetworkStatusBar() {
+        if (footerConnectionDot == null || footerConnectionText == null) return;
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(this::refreshNetworkStatusBar);
+            return;
+        }
+        boolean connected = networkService != null && networkService.isConnected();
+        boolean reconnecting = networkService != null && networkService.isReconnecting();
+        if (connected) {
+            footerConnectionDot.setForeground(GREEN);
+            footerConnectionText.setText("Đã kết nối  " + serverHost + ":" + serverPort);
+        } else if (reconnecting) {
+            footerConnectionDot.setForeground(statusDotVisible ? AMBER : new Color(255, 237, 213));
+            footerConnectionText.setText("Đang kết nối lại...");
+        } else {
+            footerConnectionDot.setForeground(new Color(220, 53, 69));
+            footerConnectionText.setText("Mất kết nối tới " + serverHost + ":" + serverPort);
+        }
+        footerSecurityBadge.setText(networkService == null
+                ? (NetworkSecurityConfig.isTlsEnabled() ? "TLS" : "Plaintext TCP")
+                : networkService.getSecurityLabel());
+        footerIdentity.setText(currentUser == null ? "" : currentUser.username + "  ·  "
+                + currentUser.getRoleName());
+        long rtt = networkService == null ? -1 : networkService.getLastHeartbeatRttMillis();
+        footerLatency.setText(rtt < 0 ? "Heartbeat: mỗi 15 giây"
+                : "Heartbeat RTT: " + rtt + " ms");
+    }
+
+    private static String escapeHtml(String text) {
+        return text.replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace("\"", "&quot;");
     }
 
     // =========================================================================
@@ -474,6 +542,7 @@ public class ClientMainGUI {
         JPanel tableCard = new JPanel(new BorderLayout(0, 8));
         tableCard.setBackground(CARD_BG);
         tableCard.setBorder(new EmptyBorder(15, 15, 15, 15));
+        tableCard.setMinimumSize(new Dimension(350, 200));
 
         ticketTableModel = new DefaultTableModel(
                 new Object[]{"Mã YC", "Tiêu đề", "Danh mục", "Mức ưu tiên", "Người gửi", "Kỹ thuật viên", "Tiến độ", "Trạng thái", "Hạn SLA", "File đính kèm"}, 0) {
@@ -482,25 +551,42 @@ public class ClientMainGUI {
         };
 
         JTable table = new JTable(ticketTableModel);
+        ticketTable = table;
         table.setRowHeight(36);
         table.setFont(new Font("Segoe UI", Font.PLAIN, 13));
         table.getTableHeader().setFont(new Font("Segoe UI", Font.BOLD, 12));
         table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
 
-        // Renderer cho cột tiến độ
-        table.getColumnModel().getColumn(6).setCellRenderer(new DefaultTableCellRenderer() {
-            @Override
-            public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int col) {
-                JLabel l = (JLabel) super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, col);
-                l.setHorizontalAlignment(SwingConstants.CENTER);
-                l.setFont(new Font("Segoe UI", Font.BOLD, 12));
-                return l;
+        table.setFillsViewportHeight(true);
+        table.setShowVerticalLines(false);
+        table.setGridColor(new Color(241, 245, 249));
+        table.getTableHeader().setPreferredSize(new Dimension(0, 38));
+        table.getTableHeader().setBackground(new Color(248, 250, 252));
+        table.getTableHeader().setForeground(new Color(71, 85, 105));
+        table.getColumnModel().getColumn(3).setCellRenderer(new PillRenderer("priority"));
+        table.getColumnModel().getColumn(6).setCellRenderer(new MiniProgressRenderer());
+        table.getColumnModel().getColumn(7).setCellRenderer(new PillRenderer("status"));
+        table.getColumnModel().getColumn(8).setCellRenderer(new SlaCellRenderer());
+        table.getColumnModel().getColumn(0).setPreferredWidth(115);
+        table.getColumnModel().getColumn(1).setPreferredWidth(220);
+        table.getColumnModel().getColumn(3).setPreferredWidth(110);
+        table.getColumnModel().getColumn(6).setPreferredWidth(100);
+        table.getColumnModel().getColumn(7).setPreferredWidth(115);
+        table.getColumnModel().getColumn(8).setPreferredWidth(135);
+        table.getColumnModel().getColumn(9).setPreferredWidth(140);
+        table.getSelectionModel().addListSelectionListener(event -> {
+            if (!event.getValueIsAdjusting()) {
+                refreshTicketInspector(getSelectedTicket());
             }
         });
 
         table.addMouseListener(new java.awt.event.MouseAdapter() {
             @Override
             public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (table.rowAtPoint(e.getPoint()) == -1) {
+                    table.clearSelection();
+                    return;
+                }
                 if (e.getClickCount() == 2 && table.getSelectedRow() >= 0) {
                     int row = table.getSelectedRow();
                     String ticketId = (String) table.getValueAt(row, 0);
@@ -515,33 +601,28 @@ public class ClientMainGUI {
         JPanel bottomBar = new JPanel(new BorderLayout(10, 5));
         bottomBar.setOpaque(false);
 
-        JPanel actionButtons = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 5));
+        JPanel actionButtons = new JPanel(new GridLayout(2, 1, 0, 4));
         actionButtons.setOpaque(false);
+        JPanel primaryActions = new JPanel(new GridLayout(1, 0, 6, 0));
+        primaryActions.setOpaque(false);
+        JPanel secondaryActions = new JPanel(new GridLayout(1, 0, 6, 0));
+        secondaryActions.setOpaque(false);
 
-        JButton btnDetail = createStyledButton("Xem chi tiết", Color.WHITE, new Color(20, 35, 60), 12);
-        btnDetail.addActionListener(e -> {
-            int row = table.getSelectedRow();
-            if (row < 0) { JOptionPane.showMessageDialog(mainFrame, "Vui lòng chọn một yêu cầu trên bảng."); return; }
-            showTicketDetailDialog((String) table.getValueAt(row, 0));
-        });
-
-        JButton btnAssign = createStyledButton("Phân công KTV (F04)", new Color(13, 110, 253), Color.WHITE, 12);
-        btnAssign.setVisible(canAssignTechnician);
+        JButton btnAssign = createStyledButton("Phân công (F04)", new Color(13, 110, 253), Color.WHITE, 12);
         btnAssign.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) { JOptionPane.showMessageDialog(mainFrame, "Vui lòng chọn một yêu cầu cần phân công."); return; }
             showAssignDialog((String) table.getValueAt(row, 0));
         });
 
-        JButton btnUpdateStatus = createStyledButton("Cập nhật tiến độ & trạng thái (F05)", new Color(25, 135, 84), Color.WHITE, 12);
-        btnUpdateStatus.setVisible(canManageTickets);
+        JButton btnUpdateStatus = createStyledButton("Tiến độ (F05)", new Color(25, 135, 84), Color.WHITE, 12);
         btnUpdateStatus.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) { JOptionPane.showMessageDialog(mainFrame, "Vui lòng chọn một yêu cầu cần cập nhật."); return; }
             showUpdateStatusDialog((String) table.getValueAt(row, 0));
         });
 
-        JButton btnDownloadAttach = createStyledButton("Tải tệp đính kèm (F04)", new Color(75, 85, 99), Color.WHITE, 12);
+        JButton btnDownloadAttach = createStyledButton("Tải tệp", new Color(75, 85, 99), Color.WHITE, 12);
         btnDownloadAttach.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) { JOptionPane.showMessageDialog(mainFrame, "Vui lòng chọn một yêu cầu có file đính kèm."); return; }
@@ -554,8 +635,7 @@ public class ClientMainGUI {
             downloadAttachmentFile(ticketId, fileName);
         });
 
-        JButton btnChat = createStyledButton("Trao đổi trực tuyến (F11)", new Color(111, 66, 193), Color.WHITE, 12);
-        if (isAdmin) btnChat.setText("Lịch sử trò chuyện (F11)");
+        JButton btnChat = createStyledButton("Trao đổi (F11)", new Color(111, 66, 193), Color.WHITE, 12);
         chatActionButton = btnChat;
         btnChat.addActionListener(e -> {
             int row = table.getSelectedRow();
@@ -570,8 +650,18 @@ public class ClientMainGUI {
             if (ticket != null) showTicketChatDialog(ticket);
         });
 
-        JButton btnEditTicket = createStyledButton("Sửa yêu cầu", Color.WHITE, new Color(20, 35, 60), 12);
-        btnEditTicket.setVisible(isAdmin);
+        JButton btnHistory = createStyledButton("Lịch sử & Đánh giá (F10)",
+                new Color(111, 66, 193), Color.WHITE, 12);
+        btnHistory.addActionListener(e -> {
+            Models.Ticket ticket = getSelectedTicket();
+            if (ticket == null) {
+                showToastNotification("Vui lòng chọn một yêu cầu để xem lịch sử.");
+            } else {
+                showHistoryReviewDialog(ticket);
+            }
+        });
+
+        JButton btnEditTicket = createStyledButton("Sửa", Color.WHITE, new Color(20, 35, 60), 12);
         btnEditTicket.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) { JOptionPane.showMessageDialog(mainFrame, "Vui lòng chọn yêu cầu cần sửa."); return; }
@@ -580,27 +670,38 @@ public class ClientMainGUI {
                     .ifPresent(this::showEditTicketDialog);
         });
 
-        JButton btnDeleteTicket = createStyledButton("Xóa yêu cầu", new Color(220, 53, 69), Color.WHITE, 12);
-        btnDeleteTicket.setVisible(isAdmin);
+        JButton btnDeleteTicket = createStyledButton("Xóa", new Color(220, 53, 69), Color.WHITE, 12);
         btnDeleteTicket.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) { JOptionPane.showMessageDialog(mainFrame, "Vui lòng chọn yêu cầu cần xóa."); return; }
             deleteTicket((String) table.getValueAt(row, 0));
         });
 
-        actionButtons.add(btnDetail);
-        actionButtons.add(btnAssign);
-        actionButtons.add(btnUpdateStatus);
-        actionButtons.add(btnDownloadAttach);
-        actionButtons.add(btnChat);
-        actionButtons.add(btnEditTicket);
-        actionButtons.add(btnDeleteTicket);
+        if (canAssignTechnician) primaryActions.add(btnAssign);
+        if (canManageTickets) primaryActions.add(btnUpdateStatus);
+        primaryActions.add(btnDownloadAttach);
+        secondaryActions.add(btnChat);
+        secondaryActions.add(btnHistory);
+        if (isAdmin) {
+            secondaryActions.add(btnEditTicket);
+            secondaryActions.add(btnDeleteTicket);
+        }
+        actionButtons.add(primaryActions);
+        actionButtons.add(secondaryActions);
 
-        bottomBar.add(actionButtons, BorderLayout.WEST);
+        bottomBar.add(actionButtons, BorderLayout.CENTER);
         tableCard.add(bottomBar, BorderLayout.SOUTH);
 
-        body.add(tableCard, BorderLayout.CENTER);
+        JPanel inspector = createTicketInspector(isAdmin, canManageTickets, canAssignTechnician);
+        inspector.setMinimumSize(new Dimension(300, 200));
+        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, tableCard, inspector);
+        splitPane.setResizeWeight(0.60);
+        splitPane.setDividerLocation(0.60);
+        splitPane.setBorder(null);
+        splitPane.setContinuousLayout(true);
+        body.add(splitPane, BorderLayout.CENTER);
         root.add(body, BorderLayout.CENTER);
+        root.add(createNetworkFooter(), BorderLayout.SOUTH);
 
         mainFrame.setContentPane(root);
         mainFrame.setVisible(true);
@@ -608,6 +709,407 @@ public class ClientMainGUI {
         // Lấy danh sách lần đầu
         requestTicketList();
         refreshChatUnreadCounts();
+    }
+
+    private JPanel createTicketInspector(boolean isAdmin, boolean canManageTickets,
+                                         boolean canAssignTechnician) {
+        JPanel inspector = new JPanel(new BorderLayout(0, 10));
+        inspector.setBackground(Color.WHITE);
+        inspector.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(BORDER),
+                new EmptyBorder(16, 16, 14, 16)));
+
+        JPanel details = new JPanel();
+        details.setOpaque(false);
+        details.setLayout(new BoxLayout(details, BoxLayout.Y_AXIS));
+        details.setBorder(new EmptyBorder(0, 0, 0, 0));
+        inspectorId = new JLabel("Chọn một yêu cầu");
+        inspectorId.setFont(new Font("Segoe UI", Font.BOLD, 12));
+        inspectorId.setForeground(BLUE);
+        inspectorId.setAlignmentX(Component.LEFT_ALIGNMENT);
+        inspectorTitle = new JTextArea("Chi tiết yêu cầu");
+        inspectorTitle.setEditable(false);
+        inspectorTitle.setLineWrap(true);
+        inspectorTitle.setWrapStyleWord(true);
+        inspectorTitle.setOpaque(false);
+        inspectorTitle.setBorder(null);
+        inspectorTitle.setFont(new Font("Segoe UI", Font.BOLD, 16));
+        inspectorTitle.setForeground(NAVY);
+        inspectorTitle.setAlignmentX(Component.LEFT_ALIGNMENT);
+        details.addComponentListener(new java.awt.event.ComponentAdapter() {
+            @Override
+            public void componentResized(java.awt.event.ComponentEvent event) {
+                updateInspectorTitleHeight(details);
+            }
+        });
+        inspectorOwner = detailValueLabel("Người gửi: —");
+        inspectorDepartment = detailValueLabel("Phòng ban: —");
+        inspectorCreatedAt = detailValueLabel("Thời gian gửi: —");
+        inspectorSla = detailValueLabel("Hạn SLA: —");
+        inspectorLatestNote = detailValueLabel("Ghi chú mới nhất: —");
+        JPanel ownerDepartmentRow = new JPanel(new GridLayout(1, 2, 8, 0));
+        ownerDepartmentRow.setOpaque(false);
+        ownerDepartmentRow.add(inspectorOwner);
+        ownerDepartmentRow.add(inspectorDepartment);
+        JPanel adminRow = null;
+        if (isAdmin) {
+            inspectorSourceIp = detailValueLabel("IP máy gửi: —");
+            adminRow = new JPanel(new GridLayout(1, 1));
+            adminRow.setOpaque(false);
+            adminRow.add(inspectorSourceIp);
+        } else {
+            inspectorSourceIp = null;
+        }
+        JPanel createdSlaRow = new JPanel(new GridLayout(1, 2, 8, 0));
+        createdSlaRow.setOpaque(false);
+        createdSlaRow.add(inspectorCreatedAt);
+        createdSlaRow.add(inspectorSla);
+        inspectorProgress = new JProgressBar(0, 100);
+        inspectorProgress.setStringPainted(true);
+        inspectorProgress.setPreferredSize(new Dimension(180, 14));
+        inspectorProgress.setMinimumSize(new Dimension(1, 14));
+        inspectorProgress.setMaximumSize(new Dimension(Integer.MAX_VALUE, 14));
+        inspectorProgress.setForeground(BLUE);
+        inspectorProgress.setBackground(new Color(226, 232, 240));
+        inspectorProgress.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        details.add(inspectorId);
+        details.add(Box.createVerticalStrut(3));
+        details.add(inspectorTitle);
+        details.add(Box.createVerticalStrut(4));
+        details.add(ownerDepartmentRow);
+        if (adminRow != null) {
+            details.add(Box.createVerticalStrut(3));
+            details.add(adminRow);
+        }
+        details.add(Box.createVerticalStrut(3));
+        details.add(createdSlaRow);
+        details.add(Box.createVerticalStrut(3));
+        details.add(inspectorLatestNote);
+        details.add(Box.createVerticalStrut(4));
+        details.add(inspectorProgress);
+        details.add(Box.createVerticalStrut(5));
+
+        JPanel quickActions = new JPanel(new GridLayout(1, 0, 4, 0));
+        quickActions.setOpaque(false);
+        quickActions.setAlignmentX(Component.LEFT_ALIGNMENT);
+        JButton assign = createStyledButton("Phân công", new Color(13, 110, 253), Color.WHITE, 11);
+        compactInspectorButton(assign);
+        assign.setVisible(canAssignTechnician);
+        assign.addActionListener(event -> {
+            Models.Ticket selected = getSelectedTicket();
+            if (selected != null) showAssignDialog(selected.id);
+        });
+        JButton update = createStyledButton("Tiến độ", new Color(25, 135, 84), Color.WHITE, 11);
+        compactInspectorButton(update);
+        update.setVisible(canManageTickets);
+        update.addActionListener(event -> {
+            Models.Ticket selected = getSelectedTicket();
+            if (selected != null) showUpdateStatusDialog(selected.id);
+        });
+        JButton download = createStyledButton("Tải tệp", new Color(75, 85, 99), Color.WHITE, 11);
+        compactInspectorButton(download);
+        download.addActionListener(event -> {
+            Models.Ticket selected = getSelectedTicket();
+            if (selected == null || selected.attachmentName == null
+                    || selected.attachmentName.isBlank()) {
+                showToastNotification("Yêu cầu này chưa có tệp đính kèm.");
+            } else {
+                downloadAttachmentFile(selected.id, selected.attachmentName);
+            }
+        });
+        JButton detail = createStyledButton("Chi tiết", Color.WHITE, NAVY, 11);
+        compactInspectorButton(detail);
+        detail.addActionListener(event -> {
+            Models.Ticket selected = getSelectedTicket();
+            if (selected != null) showTicketDetailDialog(selected.id);
+        });
+        JButton history = createStyledButton("Lịch sử F10",
+                new Color(111, 66, 193), Color.WHITE, 11);
+        compactInspectorButton(history);
+        history.addActionListener(event -> {
+            Models.Ticket selected = getSelectedTicket();
+            if (selected != null) {
+                showHistoryReviewDialog(selected);
+            } else {
+                showToastNotification("Vui lòng chọn một yêu cầu để xem lịch sử.");
+            }
+        });
+        quickActions.add(assign);
+        quickActions.add(update);
+        quickActions.add(download);
+        quickActions.add(history);
+        quickActions.add(detail);
+        details.add(quickActions);
+        inspector.add(details, BorderLayout.NORTH);
+
+        inspectorChatHost = new JPanel(new BorderLayout());
+        inspectorChatHost.setBackground(Color.WHITE);
+        JLabel empty = new JLabel("Chọn một yêu cầu để xem trao đổi trực tuyến.", SwingConstants.CENTER);
+        empty.setForeground(new Color(100, 116, 139));
+        inspectorChatHost.add(empty, BorderLayout.CENTER);
+        JPanel chatSection = new JPanel(new BorderLayout(0, 6));
+        chatSection.setOpaque(false);
+        JLabel chatHeading = new JLabel("Trao đổi trực tuyến (F11)");
+        chatHeading.setFont(new Font("Segoe UI", Font.BOLD, 12));
+        chatHeading.setForeground(new Color(71, 85, 105));
+        chatSection.add(chatHeading, BorderLayout.NORTH);
+        chatSection.add(inspectorChatHost, BorderLayout.CENTER);
+        inspector.add(chatSection, BorderLayout.CENTER);
+        inspector.setPreferredSize(new Dimension(420, 400));
+        inspectorId.setText("Chi tiết yêu cầu");
+        inspectorTitle.setText("Chọn một yêu cầu để xem chi tiết");
+        return inspector;
+    }
+
+    private JLabel detailValueLabel(String text) {
+        JLabel label = new JLabel(text);
+        label.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        label.setForeground(new Color(71, 85, 105));
+        label.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return label;
+    }
+
+    private void compactInspectorButton(JButton button) {
+        button.setFont(button.getFont().deriveFont(Font.PLAIN, 10f));
+        button.setMargin(new Insets(3, 6, 3, 6));
+        button.setPreferredSize(null);
+    }
+
+    private Models.Ticket getSelectedTicket() {
+        if (ticketTable == null || ticketTable.getSelectedRow() < 0) return null;
+        int modelRow = ticketTable.convertRowIndexToModel(ticketTable.getSelectedRow());
+        if (modelRow < 0 || modelRow >= cachedTickets.size()) return null;
+        String ticketId = String.valueOf(ticketTableModel.getValueAt(modelRow, 0));
+        return cachedTickets.stream().filter(ticket -> ticket.id.equals(ticketId))
+                .findFirst().orElse(null);
+    }
+
+    private void refreshTicketInspector(Models.Ticket ticket) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> refreshTicketInspector(ticket));
+            return;
+        }
+        if (inspectorChatHost == null) return;
+        if (ticket == null) {
+            if (inspectorChatTicketId != null) {
+                inspectorTicketChats.remove(inspectorChatTicketId);
+            }
+            inspectorChatTicketId = null;
+            inspectorId.setText("Chi tiết yêu cầu");
+            inspectorTitle.setText("Chọn một yêu cầu để xem chi tiết");
+            updateInspectorTitleHeight((JPanel) inspectorTitle.getParent());
+            inspectorOwner.setText("Người gửi: —");
+            inspectorDepartment.setText("Phòng ban: —");
+            if (inspectorSourceIp != null) {
+                inspectorSourceIp.setText("IP máy gửi: —");
+            }
+            inspectorCreatedAt.setText("Thời gian gửi: —");
+            inspectorSla.setText("Hạn SLA: —");
+            inspectorLatestNote.setText("Ghi chú mới nhất: —");
+            inspectorProgress.setValue(0);
+            inspectorProgress.setString("—");
+            inspectorChatHost.removeAll();
+            inspectorChatHost.add(new JLabel("Chọn một yêu cầu để xem trao đổi trực tuyến.",
+                    SwingConstants.CENTER), BorderLayout.CENTER);
+            inspectorChatHost.revalidate();
+            inspectorChatHost.repaint();
+            return;
+        }
+        inspectorId.setText(ticket.id + "  ·  " + nullSafe(ticket.status));
+        inspectorTitle.setText(nullSafe(ticket.title));
+        updateInspectorTitleHeight((JPanel) inspectorTitle.getParent());
+        inspectorOwner.setText("Người gửi: " + nullSafe(ticket.owner));
+        inspectorDepartment.setText("Phòng ban: " + nullSafe(ticket.ownerDepartment));
+        if (inspectorSourceIp != null) {
+            String ipDisplay = (ticket.sourceIp == null || ticket.sourceIp.isBlank())
+                    ? "Chưa ghi nhận" : ticket.sourceIp;
+            inspectorSourceIp.setText("IP máy gửi: " + ipDisplay);
+        }
+        inspectorCreatedAt.setText("Gửi: " + formatCompactCreatedAt(ticket.createdAt, ticket.createdDate));
+        inspectorSla.setText("SLA: " + formatSlaDeadline(ticket.slaDueAt));
+        inspectorLatestNote.setText("<html><body style='width:270px'>Ghi chú: "
+                + escapeHtml(nullSafe(ticket.latestNote)) + "</body></html>");
+        inspectorProgress.setValue(Math.max(0, Math.min(100, ticket.progress)));
+        inspectorProgress.setString(ticket.progress + "% hoàn thành");
+        inspectorProgress.setForeground(ticket.progress >= 100 ? GREEN : BLUE);
+
+        if (ticket.id.equals(inspectorChatTicketId)
+                && inspectorTicketChats.containsKey(ticket.id)) return;
+        if (inspectorChatTicketId != null) {
+            inspectorTicketChats.remove(inspectorChatTicketId);
+        }
+        inspectorChatTicketId = ticket.id;
+        inspectorChatHost.removeAll();
+        JPanel chatPanel = createTicketChatPanel(ticket, mainFrame, true);
+        inspectorTicketChats.put(ticket.id, (JPanel) chatPanel.getClientProperty("transcript"));
+        inspectorChatHost.add(chatPanel, BorderLayout.CENTER);
+        inspectorChatHost.revalidate();
+        inspectorChatHost.repaint();
+    }
+
+    private void updateInspectorTitleHeight(JPanel details) {
+        if (inspectorTitle == null || details == null || details.getWidth() <= 0) return;
+        int width = Math.max(1, details.getWidth()
+                - details.getInsets().left - details.getInsets().right);
+        java.awt.FontMetrics metrics = inspectorTitle.getFontMetrics(inspectorTitle.getFont());
+        int lines = 0;
+        for (String paragraph : inspectorTitle.getText().split("\\R", -1)) {
+            if (paragraph.isEmpty()) {
+                lines++;
+                continue;
+            }
+            int lineWidth = 0;
+            for (String word : paragraph.split("\\s+")) {
+                int wordWidth = metrics.stringWidth(word);
+                if (lineWidth > 0 && lineWidth + metrics.stringWidth(" ") + wordWidth > width) {
+                    lines++;
+                    lineWidth = 0;
+                }
+                if (wordWidth > width) {
+                    int charWidth = 0;
+                    for (int index = 0; index < word.length(); index++) {
+                        int nextWidth = metrics.charWidth(word.charAt(index));
+                        if (charWidth > 0 && charWidth + nextWidth > width) {
+                            lines++;
+                            charWidth = 0;
+                        }
+                        charWidth += nextWidth;
+                    }
+                    lineWidth = charWidth;
+                } else {
+                    lineWidth += (lineWidth == 0 ? 0 : metrics.stringWidth(" ")) + wordWidth;
+                }
+            }
+            lines++;
+        }
+        int height = Math.max(1, lines) * metrics.getHeight()
+                + inspectorTitle.getInsets().top + inspectorTitle.getInsets().bottom;
+        inspectorTitle.setPreferredSize(new Dimension(width, height));
+        details.revalidate();
+    }
+
+    private static String nullSafe(String value) {
+        return value == null || value.isBlank() ? "—" : value;
+    }
+
+    private static final class PillRenderer extends DefaultTableCellRenderer {
+        private final String type;
+
+        private PillRenderer(String type) {
+            this.type = type;
+            setHorizontalAlignment(SwingConstants.CENTER);
+            setBorder(new EmptyBorder(0, 4, 0, 4));
+        }
+
+        @Override
+        public Component getTableCellRendererComponent(JTable table, Object value,
+                                                       boolean selected, boolean focus,
+                                                       int row, int column) {
+            String text = value == null ? "" : value.toString();
+            super.getTableCellRendererComponent(table, text, selected, focus, row, column);
+            setOpaque(false);
+            if (selected) {
+                setForeground(Color.WHITE);
+                setBackground(table.getSelectionBackground());
+                return this;
+            }
+            Color background;
+            Color foreground;
+            if ("priority".equals(type)) {
+                switch (text.toLowerCase(java.util.Locale.ROOT)) {
+                    case "khẩn cấp" -> { background = new Color(254, 226, 226); foreground = new Color(185, 28, 28); }
+                    case "cao" -> { background = new Color(255, 237, 213); foreground = new Color(194, 65, 12); }
+                    case "thấp" -> { background = new Color(241, 245, 249); foreground = new Color(71, 85, 105); }
+                    default -> { background = new Color(219, 234, 254); foreground = new Color(29, 78, 216); }
+                }
+            } else {
+                switch (text.toLowerCase(java.util.Locale.ROOT)) {
+                    case "mới" -> { background = new Color(219, 234, 254); foreground = new Color(29, 78, 216); }
+                    case "đang xử lý" -> { background = new Color(254, 243, 199); foreground = new Color(146, 64, 14); }
+                    case "hoàn thành" -> { background = new Color(220, 252, 231); foreground = new Color(21, 128, 61); }
+                    default -> { background = new Color(241, 245, 249); foreground = new Color(71, 85, 105); }
+                }
+            }
+            setBackground(background);
+            setForeground(foreground);
+            setFont(table.getFont().deriveFont(Font.BOLD, 11f));
+            return this;
+        }
+
+        @Override
+        protected void paintComponent(Graphics graphics) {
+            if (isOpaque()) {
+                super.paintComponent(graphics);
+                return;
+            }
+            Graphics2D g = (Graphics2D) graphics.create();
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setColor(getBackground());
+            g.fillRoundRect(5, 6, getWidth() - 10, getHeight() - 12, 16, 16);
+            g.dispose();
+            super.paintComponent(graphics);
+        }
+    }
+
+    private static final class MiniProgressRenderer extends JProgressBar
+            implements javax.swing.table.TableCellRenderer {
+        private MiniProgressRenderer() {
+            super(0, 100);
+            setStringPainted(true);
+            setBorderPainted(false);
+            setPreferredSize(new Dimension(76, 12));
+            setFont(new Font("Segoe UI", Font.BOLD, 10));
+        }
+
+        @Override
+        public Component getTableCellRendererComponent(JTable table, Object value,
+                                                       boolean selected, boolean focus,
+                                                       int row, int column) {
+            int progress = value instanceof Number number ? number.intValue() : 0;
+            setValue(Math.max(0, Math.min(100, progress)));
+            setString(progress + "%");
+            setForeground(progress >= 100 ? GREEN : new Color(59, 130, 246));
+            setBackground(selected ? table.getSelectionBackground() : new Color(226, 232, 240));
+            setBorder(selected ? BorderFactory.createLineBorder(table.getSelectionBackground())
+                    : BorderFactory.createEmptyBorder(10, 8, 10, 8));
+            return this;
+        }
+    }
+
+    private static final class SlaCellRenderer extends DefaultTableCellRenderer {
+        private SlaCellRenderer() {
+            setHorizontalAlignment(SwingConstants.CENTER);
+        }
+
+        @Override
+        public Component getTableCellRendererComponent(JTable table, Object value,
+                                                       boolean selected, boolean focus,
+                                                       int row, int column) {
+            String raw = value == null ? "" : value.toString();
+            String text = "Chưa có hạn";
+            Color color = new Color(71, 85, 105);
+            try {
+                java.time.LocalDateTime due = java.time.LocalDateTime.parse(raw);
+                double hours = BusinessHours.workingHoursBetween(java.time.LocalDateTime.now(), due);
+                boolean overdue = due.isBefore(java.time.LocalDateTime.now());
+                String date = due.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM HH:mm"));
+                if (overdue) {
+                    text = "[QUÁ HẠN] " + date;
+                    color = new Color(185, 28, 28);
+                } else {
+                    text = date;
+                    if (hours <= 1.0) color = AMBER;
+                }
+            } catch (java.time.format.DateTimeParseException ignored) {
+                if (!raw.isBlank()) text = raw;
+            }
+            super.getTableCellRendererComponent(table, text, selected, focus, row, column);
+            setForeground(selected ? table.getSelectionForeground() : color);
+            setFont(table.getFont().deriveFont(color.equals(new Color(185, 28, 28))
+                    || color.equals(AMBER) ? Font.BOLD : Font.PLAIN));
+            return this;
+        }
     }
 
     // =========================================================================
@@ -618,27 +1120,41 @@ public class ClientMainGUI {
             try {
                 F03_ViewTickets.ViewTicketsRequest req = new F03_ViewTickets.ViewTicketsRequest(currentUser.username, currentUser.role);
                 Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_GET_TICKETS, "", "", req);
-                sendAndReceiveSync(packet);
+                Protocol.Packet response = sendAndReceiveSync(packet);
+                if (Protocol.STATUS_SUCCESS.equals(response.status) && response.data instanceof List<?> rows) {
+                    List<Models.Ticket> tickets = rows.stream()
+                            .filter(Models.Ticket.class::isInstance)
+                            .map(Models.Ticket.class::cast).toList();
+                    SwingUtilities.invokeLater(() -> displayTickets(tickets));
+                } else if (!Protocol.STATUS_SUCCESS.equals(response.status)) {
+                    System.err.println("Lỗi tải danh sách yêu cầu: " + response.message);
+                }
             } catch (Exception e) {
                 System.err.println("Lỗi gửi yêu cầu danh sách: " + e.getMessage());
             }
         }).start();
     }
 
-    public synchronized Protocol.Packet sendAndReceiveSync(Protocol.Packet sendPacket) throws Exception {
-        String command = sendPacket.command;
-        Object commandLock = commandLocks.computeIfAbsent(command, k -> new Object());
-        synchronized (commandLock) {
-            BlockingQueue<Protocol.Packet> queue = responseQueues.computeIfAbsent(command, k -> new LinkedBlockingQueue<>());
-            queue.clear();
-            synchronized (out) {
-                out.writeObject(sendPacket);
-                out.flush();
+    public Protocol.Packet sendAndReceiveSync(Protocol.Packet sendPacket) throws Exception {
+        if (networkService == null) throw new IOException("Chưa kết nối tới máy chủ.");
+        return networkService.request(sendPacket);
+    }
+
+    private void sendCommandAsync(Protocol.Packet request, java.awt.Component dialog,
+                                 String errorTitle,
+                                 java.util.function.Consumer<Protocol.Packet> onSuccess) {
+        new Thread(() -> {
+            try {
+                Protocol.Packet response = sendAndReceiveSync(request);
+                if (!Protocol.STATUS_SUCCESS.equals(response.status)) {
+                    throw new IOException(response.message);
+                }
+                SwingUtilities.invokeLater(() -> onSuccess.accept(response));
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(dialog,
+                        e.getMessage(), errorTitle, JOptionPane.ERROR_MESSAGE));
             }
-            Protocol.Packet response = queue.poll(15, TimeUnit.SECONDS);
-            if (response == null) throw new IOException("Server không phản hồi lệnh " + command + " trong 15 giây.");
-            return response;
-        }
+        }, "workdesk-command-" + request.command).start();
     }
 
     private void searchTickets(String keyword, String statusLabel, String categoryLabel, String priorityLabel) {
@@ -657,11 +1173,72 @@ public class ClientMainGUI {
     }
 
     private void displayTickets(List<Models.Ticket> rows) {
+        String previouslySelectedId = getSelectedTicket() == null ? null : getSelectedTicket().id;
         cachedTickets = new ArrayList<>(rows);
         if (ticketTableModel == null) return;
         ticketTableModel.setRowCount(0);
         for (Models.Ticket t : rows) ticketTableModel.addRow(new Object[]{t.id, t.title, t.category, t.priority,
-                t.owner, t.assignedTech, t.progress + "%", t.status, formatSlaDeadline(t.slaDueAt), t.attachmentName});
+                t.owner, t.assignedTech, t.progress, t.status, t.slaDueAt, t.attachmentName});
+        int selectedModelRow = -1;
+        if (previouslySelectedId != null) {
+            for (int row = 0; row < ticketTableModel.getRowCount(); row++) {
+                if (previouslySelectedId.equals(ticketTableModel.getValueAt(row, 0))) {
+                    selectedModelRow = row;
+                    break;
+                }
+            }
+        }
+        if (ticketTable != null && selectedModelRow >= 0) {
+            int viewRow = ticketTable.convertRowIndexToView(selectedModelRow);
+            ticketTable.setRowSelectionInterval(viewRow, viewRow);
+        } else {
+            if (ticketTable != null) ticketTable.clearSelection();
+            refreshTicketInspector(null);
+        }
+    }
+
+    private String formatCreatedAt(String value, String fallbackDate) {
+        if (value == null || value.isBlank()) value = fallbackDate;
+        if (value == null || value.isBlank()) return "—";
+        try {
+            java.time.LocalDateTime created;
+            try {
+                created = java.time.LocalDateTime.parse(value,
+                        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            } catch (java.time.format.DateTimeParseException e) {
+                created = java.time.LocalDateTime.parse(value);
+            }
+            return created.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss"));
+        } catch (java.time.format.DateTimeParseException e) {
+            try {
+                return java.time.LocalDate.parse(value).atStartOfDay()
+                        .format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss"));
+            } catch (java.time.format.DateTimeParseException ignored) {
+                return value;
+            }
+        }
+    }
+
+    private String formatCompactCreatedAt(String value, String fallbackDate) {
+        if (value == null || value.isBlank()) value = fallbackDate;
+        if (value == null || value.isBlank()) return "—";
+        try {
+            java.time.LocalDateTime created;
+            try {
+                created = java.time.LocalDateTime.parse(value,
+                        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            } catch (java.time.format.DateTimeParseException e) {
+                created = java.time.LocalDateTime.parse(value);
+            }
+            return created.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM HH:mm"));
+        } catch (java.time.format.DateTimeParseException e) {
+            try {
+                return java.time.LocalDate.parse(value)
+                        .format(java.time.format.DateTimeFormatter.ofPattern("dd/MM"));
+            } catch (java.time.format.DateTimeParseException ignored) {
+                return value;
+            }
+        }
     }
 
     private String formatSlaDeadline(String value) {
@@ -831,7 +1408,7 @@ public class ClientMainGUI {
     // =========================================================================
     private void showCreateTicketDialog() {
         JDialog dialog = new JDialog(mainFrame, "Tạo yêu cầu hỗ trợ kỹ thuật (F02)", true);
-        dialog.setSize(520, 500);
+        dialog.setSize(520, 530);
         dialog.setLocationRelativeTo(mainFrame);
 
         JPanel p = new JPanel(new GridLayout(0, 1, 6, 6));
@@ -840,6 +1417,18 @@ public class ClientMainGUI {
         JTextField txtTitle = new JTextField();
         JComboBox<String> cbCategory = new JComboBox<>(new String[]{"IT - Phần cứng", "Mạng & Internet", "Phần mềm & Cấp quyền", "Nhân sự", "Hành chính", "Tài chính"});
         JComboBox<String> cbPriority = new JComboBox<>(new String[]{"Bình thường", "Thấp", "Cao", "Khẩn cấp"});
+        JLabel lblSlaPreview = new JLabel();
+        Runnable updateSlaPreview = () -> {
+            String workingHours = switch ((String) cbPriority.getSelectedItem()) {
+                case "Khẩn cấp" -> "4";
+                case "Cao" -> "24";
+                case "Thấp" -> "120";
+                default -> "72";
+            };
+            lblSlaPreview.setText("Hạn xử lý SLA: " + workingHours + " giờ làm việc");
+        };
+        cbPriority.addActionListener(event -> updateSlaPreview.run());
+        updateSlaPreview.run();
         JTextArea txtDetail = new JTextArea(4, 20);
         txtDetail.setLineWrap(true);
         txtDetail.setWrapStyleWord(true);
@@ -862,6 +1451,7 @@ public class ClientMainGUI {
         p.add(cbCategory);
         p.add(new JLabel("Mức độ ưu tiên:"));
         p.add(cbPriority);
+        p.add(lblSlaPreview);
         p.add(new JLabel("Mô tả chi tiết sự cố: *"));
         p.add(new JScrollPane(txtDetail));
 
@@ -882,34 +1472,50 @@ public class ClientMainGUI {
             }
 
             String fileName = (chosenFile[0] != null) ? chosenFile[0].getName() : "";
-            // Nếu có file đính kèm, sao chép vào server storage trước
+            byte[] attachmentBytes = null;
             if (chosenFile[0] != null) {
                 try {
-                    File dest = new File(FileTransferHelper.SERVER_STORAGE_DIR, fileName);
-                    try (FileInputStream fis = new FileInputStream(chosenFile[0]);
-                         FileOutputStream fos = new FileOutputStream(dest)) {
-                        fis.transferTo(fos);
+                    if (chosenFile[0].length() <= 0
+                            || chosenFile[0].length() > FileTransferHelper.MAX_ATTACHMENT_SIZE) {
+                        JOptionPane.showMessageDialog(dialog,
+                                "Tệp phải lớn hơn 0 byte và không vượt quá 10 MB.",
+                                "Kích thước tệp không hợp lệ", JOptionPane.WARNING_MESSAGE);
+                        return;
                     }
-                } catch (Exception ignored) {}
+                    attachmentBytes = java.nio.file.Files.readAllBytes(chosenFile[0].toPath());
+                } catch (IOException ex) {
+                    JOptionPane.showMessageDialog(dialog, "Không thể đọc tệp đính kèm: " + ex.getMessage(),
+                            "Lỗi tệp", JOptionPane.ERROR_MESSAGE);
+                    return;
+                }
             }
 
             F02_CreateTicket.CreateTicketRequest req = new F02_CreateTicket.CreateTicketRequest(
                     title, (String) cbCategory.getSelectedItem(), (String) cbPriority.getSelectedItem(),
-                    detail, currentUser.username, fileName
+                    detail, currentUser.username, fileName, attachmentBytes
             );
 
-            try {
+            btnSubmit.setEnabled(false);
+            new Thread(() -> {
+                try {
                 Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_CREATE_TICKET, "", "", req);
-                synchronized (out) {
-                    out.writeObject(packet);
-                    out.flush();
+                    Protocol.Packet response = sendAndReceiveSync(packet);
+                    if (!Protocol.STATUS_SUCCESS.equals(response.status)) {
+                        throw new IOException(response.message);
+                    }
+                    SwingUtilities.invokeLater(() -> {
+                        JOptionPane.showMessageDialog(dialog, response.message,
+                                "Thành công", JOptionPane.INFORMATION_MESSAGE);
+                        dialog.dispose();
+                        refreshTicketsDirectly();
+                    });
+                } catch (Exception ex) {
+                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(dialog,
+                            "Lỗi gửi yêu cầu: " + ex.getMessage(), "Lỗi", JOptionPane.ERROR_MESSAGE));
+                } finally {
+                    SwingUtilities.invokeLater(() -> btnSubmit.setEnabled(true));
                 }
-                JOptionPane.showMessageDialog(dialog, "Yêu cầu đã được gửi lên Server qua Socket!", "Thành công", JOptionPane.INFORMATION_MESSAGE);
-                dialog.dispose();
-                refreshTicketsDirectly();
-            } catch (Exception ex) {
-                JOptionPane.showMessageDialog(dialog, "Lỗi gửi gói tin Socket: " + ex.getMessage());
-            }
+            }, "f02-create-ticket").start();
         });
 
         dialog.setContentPane(p);
@@ -922,6 +1528,11 @@ public class ClientMainGUI {
     private void showTicketDetailDialog(String ticketId) {
         Models.Ticket t = cachedTickets.stream().filter(x -> x.id.equals(ticketId)).findFirst().orElse(null);
         if (t == null) return;
+        if (t.assignedTech == null || t.assignedTech.isBlank()
+                || "Chưa phân công".equalsIgnoreCase(t.assignedTech)) {
+            showToastNotification("Yêu cầu chưa được phân công kỹ thuật viên. Vui lòng phân công KTV trước khi cập nhật tiến độ.");
+            return;
+        }
 
         JDialog d = new JDialog(mainFrame, "Chi tiết yêu cầu: " + t.id, true);
         d.setSize(520, 500);
@@ -934,7 +1545,15 @@ public class ClientMainGUI {
         p.add(new JLabel("<html><b>Mã yêu cầu:</b> " + t.id + "</html>"));
         p.add(new JLabel("<html><b>Tiêu đề:</b> " + t.title + "</html>"));
         p.add(new JLabel("<html><b>Danh mục:</b> " + t.category + " | <b>Ưu tiên:</b> " + t.priority + "</html>"));
-        p.add(new JLabel("<html><b>Người tạo:</b> " + t.owner + " | <b>Ngày:</b> " + t.createdDate + "</html>"));
+        p.add(new JLabel("<html><b>Người tạo:</b> " + t.owner + " | <b>Thời gian gửi:</b> "
+                + formatCreatedAt(t.createdAt, t.createdDate) + "</html>"));
+        p.add(new JLabel("<html><b>Phòng ban:</b> "
+                + (t.ownerDepartment == null || t.ownerDepartment.isBlank() ? "Chưa cập nhật" : t.ownerDepartment)
+                + "</html>"));
+        if ("admin".equalsIgnoreCase(currentUser.role)) {
+            p.add(new JLabel("<html><b>IP máy gửi:</b> "
+                    + (t.sourceIp == null || t.sourceIp.isBlank() ? "Chưa ghi nhận" : t.sourceIp) + "</html>"));
+        }
         p.add(new JLabel("<html><b>Kỹ thuật viên phụ trách:</b> " + t.assignedTech + "</html>"));
         p.add(new JLabel("<html><b>Trạng thái:</b> " + t.status + " | <b>Tiến độ:</b> " + t.progress + "%</html>"));
         p.add(new JLabel("<html><b>Tệp đính kèm:</b> " + (t.attachmentName.isEmpty() ? "Không có" : t.attachmentName) + "</html>"));
@@ -944,10 +1563,6 @@ public class ClientMainGUI {
         ta.setLineWrap(true);
         p.add(new JLabel("Nội dung chi tiết:"));
         p.add(new JScrollPane(ta));
-
-        JButton btnHistory = createStyledButton("Lịch sử xử lý & đánh giá (F10)", new Color(111, 66, 193), Color.WHITE, 12);
-        btnHistory.addActionListener(e -> showHistoryReviewDialog(t));
-        p.add(btnHistory);
 
         JButton btnClose = createStyledButton("Đóng", new Color(108, 117, 125), Color.WHITE, 12);
         btnClose.addActionListener(e -> d.dispose());
@@ -976,16 +1591,57 @@ public class ClientMainGUI {
                     if (history.isEmpty()) text.append("Chưa có lịch sử xử lý.");
                     if (review != null) text.append("\nĐánh giá hiện tại: ").append(review.rating).append("/5 - ").append(review.comment == null ? "" : review.comment);
                     timeline.setText(text.toString()); root.add(new JScrollPane(timeline), BorderLayout.CENTER);
-                    JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+                    JPanel footer = new JPanel(new BorderLayout(0, 8));
                     boolean canRate = "requester".equalsIgnoreCase(currentUser.role) && currentUser.username.equalsIgnoreCase(ticket.owner) && "Hoàn thành".equalsIgnoreCase(ticket.status);
                     if (canRate) {
-                        JComboBox<Integer> rating = new JComboBox<>(new Integer[]{5, 4, 3, 2, 1});
-                        JTextField comment = new JTextField(23); comment.setToolTipText("Nhận xét về kết quả hỗ trợ");
+                        int[] selectedRating = {review == null ? 5 : review.rating};
+                        JButton[] stars = new JButton[5];
+                        JPanel reviewInput = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+                        reviewInput.add(new JLabel("Đánh giá KTV:"));
+                        for (int index = 0; index < stars.length; index++) {
+                            int ratingValue = index + 1;
+                            JButton star = new JButton();
+                            star.setFont(new Font("Segoe UI Symbol", Font.PLAIN, 24));
+                            star.setBorderPainted(false);
+                            star.setContentAreaFilled(false);
+                            star.setFocusPainted(false);
+                            stars[index] = star;
+                            star.addActionListener(e -> {
+                                selectedRating[0] = ratingValue;
+                                for (int starIndex = 0; starIndex < stars.length; starIndex++) {
+                                    stars[starIndex].setText(starIndex < ratingValue ? "★" : "☆");
+                                    stars[starIndex].setForeground(starIndex < ratingValue
+                                            ? new Color(217, 119, 6) : new Color(148, 163, 184));
+                                }
+                            });
+                            reviewInput.add(star);
+                        }
+                        for (int index = 0; index < stars.length; index++) {
+                            stars[index].setText(index < selectedRating[0] ? "★" : "☆");
+                            stars[index].setForeground(index < selectedRating[0]
+                                    ? new Color(217, 119, 6) : new Color(148, 163, 184));
+                        }
+                        JTextField comment = new JTextField(review == null || review.comment == null
+                                ? "" : review.comment, 18);
+                        comment.setToolTipText("Nhận xét về kết quả hỗ trợ");
                         JButton save = createStyledButton("Lưu đánh giá", BLUE, Color.WHITE, 12);
-                        save.addActionListener(e -> saveTicketReview(ticket.id, (Integer) rating.getSelectedItem(), comment.getText(), dialog));
-                        footer.add(new JLabel("Điểm: ")); footer.add(rating); footer.add(comment); footer.add(save);
+                        save.addActionListener(e -> saveTicketReview(ticket.id, selectedRating[0],
+                                comment.getText(), dialog));
+                        reviewInput.add(comment);
+                        footer.add(reviewInput, BorderLayout.CENTER);
+                        JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+                        actions.add(save);
+                        JButton close = createStyledButton("Đóng", new Color(108,117,125), Color.WHITE, 12);
+                        close.addActionListener(e -> dialog.dispose());
+                        actions.add(close);
+                        footer.add(actions, BorderLayout.SOUTH);
+                    } else {
+                        JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+                        JButton close = createStyledButton("Đóng", new Color(108,117,125), Color.WHITE, 12);
+                        close.addActionListener(e -> dialog.dispose());
+                        actions.add(close);
+                        footer.add(actions, BorderLayout.SOUTH);
                     }
-                    JButton close = createStyledButton("Đóng", new Color(108,117,125), Color.WHITE, 12); close.addActionListener(e -> dialog.dispose()); footer.add(close);
                     root.add(footer, BorderLayout.SOUTH); dialog.setContentPane(root); dialog.setVisible(true);
                 });
             } catch (Exception ex) { SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(mainFrame, ex.getMessage(), "F10 - Lịch sử", JOptionPane.ERROR_MESSAGE)); }
@@ -1019,24 +1675,37 @@ public class ClientMainGUI {
         dialog.setLocationRelativeTo(mainFrame);
         dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
 
-        JPanel transcript = new JPanel();
-        transcript.setLayout(new BoxLayout(transcript, BoxLayout.Y_AXIS));
-        transcript.setBackground(Color.WHITE);
-        transcript.add(new JLabel("Đang tải lịch sử trao đổi..."));
-        openTicketChats.put(ticket.id, transcript);
-        loadingTicketChats.add(ticket.id);
+        JPanel chatPanel = createTicketChatPanel(ticket, dialog, false);
         dialog.addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
             public void windowClosed(java.awt.event.WindowEvent e) {
+                JPanel transcript = (JPanel) chatPanel.getClientProperty("transcript");
                 openTicketChats.remove(ticket.id, transcript);
-                pendingTicketChatMessages.remove(ticket.id);
-                loadingTicketChats.remove(ticket.id);
             }
         });
+        dialog.setContentPane(chatPanel);
+        dialog.setVisible(true);
+    }
+
+    private JPanel createTicketChatPanel(Models.Ticket ticket, Component dialogParent, boolean embedded) {
+        JPanel transcript = new JPanel();
+        transcript.setLayout(new BoxLayout(transcript, BoxLayout.Y_AXIS));
+        transcript.setBackground(Color.WHITE);
+        JLabel loadingLabel = new JLabel("Đang tải lịch sử trao đổi...");
+        loadingLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        transcript.add(loadingLabel);
+        if (!embedded) openTicketChats.put(ticket.id, transcript);
+        loadingTicketChats.add(ticket.id);
 
         JTextField messageInput = new JTextField();
-        JButton sendButton = createStyledButton("Gửi qua TCP", BLUE, Color.WHITE, 12);
-        JButton attachButton = createStyledButton("Gửi ảnh/tệp", new Color(108, 117, 125), Color.WHITE, 12);
+        messageInput.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        messageInput.setBorder(BorderFactory.createCompoundBorder(
+                new LineBorder(BORDER, 1, true), new EmptyBorder(4, 8, 4, 8)));
+        messageInput.setPreferredSize(new Dimension(100, 34));
+        JButton sendButton = createStyledButton("Gửi", BLUE, Color.WHITE, 11);
+        JButton attachButton = createStyledButton("Gửi ảnh/tệp", new Color(108, 117, 125), Color.WHITE, 11);
+        sendButton.setMargin(new Insets(4, 8, 4, 8));
+        attachButton.setMargin(new Insets(4, 8, 4, 8));
         sendButton.setEnabled(!"Hoàn thành".equalsIgnoreCase(ticket.status)
                 && !"Đã hủy".equalsIgnoreCase(ticket.status));
         attachButton.setEnabled(sendButton.isEnabled());
@@ -1054,34 +1723,44 @@ public class ClientMainGUI {
                     }
                     SwingUtilities.invokeLater(() -> messageInput.setText(""));
                 } catch (Exception ex) {
-                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(dialog, ex.getMessage(),
+                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(dialogParent, ex.getMessage(),
                             "F11 - Trao đổi trực tuyến", JOptionPane.ERROR_MESSAGE));
                 } finally {
                     SwingUtilities.invokeLater(() -> sendButton.setEnabled(true));
                 }
             }, "f11-send-chat").start();
         });
-        messageInput.addActionListener(e -> sendButton.doClick());
-
+        messageInput.getInputMap().put(KeyStroke.getKeyStroke("ENTER"), "send-chat-message");
+        messageInput.getActionMap().put("send-chat-message", new AbstractAction() {
+            @Override
+            public void actionPerformed(java.awt.event.ActionEvent event) {
+                sendButton.doClick();
+            }
+        });
         attachButton.addActionListener(e -> chooseAndSendChatAttachment(ticket.id, messageInput, sendButton,
-                attachButton, dialog));
-        JPanel composerActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+                attachButton, dialogParent));
+        JPanel composerActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        composerActions.setOpaque(false);
         composerActions.add(attachButton);
         composerActions.add(sendButton);
-        JPanel composer = new JPanel(new BorderLayout(8, 0));
-        composer.setBorder(new EmptyBorder(10, 0, 0, 0));
+        JPanel composer = new JPanel(new BorderLayout(6, 0));
+        composer.setBorder(new EmptyBorder(6, 0, 0, 0));
         composer.add(messageInput, BorderLayout.CENTER);
         composer.add(composerActions, BorderLayout.EAST);
+        composer.setPreferredSize(new Dimension(1, 40));
+        composer.setMinimumSize(new Dimension(1, 40));
 
         JScrollPane transcriptScroll = new JScrollPane(transcript);
         transcriptScroll.getVerticalScrollBar().setUnitIncrement(16);
-        JPanel content = new JPanel(new BorderLayout(8, 8));
-        content.setBorder(new EmptyBorder(12, 12, 12, 12));
-        content.add(new JLabel("Trao đổi và tệp đính kèm được lưu theo yêu cầu. Giới hạn 10 MB/tệp."), BorderLayout.NORTH);
+        JPanel content = new JPanel(new BorderLayout(0, 4));
+        if (!embedded) content.setBorder(new EmptyBorder(12, 12, 12, 12));
+        if (!embedded) {
+            content.add(new JLabel("Trao đổi và tệp đính kèm được lưu theo yêu cầu. Giới hạn 10 MB/tệp."),
+                    BorderLayout.NORTH);
+        }
         content.add(transcriptScroll, BorderLayout.CENTER);
         content.add(composer, BorderLayout.SOUTH);
-        dialog.setContentPane(content);
-        dialog.setVisible(true);
+        content.putClientProperty("transcript", transcript);
 
         new Thread(() -> {
             try {
@@ -1128,13 +1807,15 @@ public class ClientMainGUI {
                     transcript.revalidate();
                     transcript.repaint();
                     sendButton.setEnabled(false);
+                    attachButton.setEnabled(false);
                 });
             }
         }, "f11-load-chat").start();
+        return content;
     }
 
     private void chooseAndSendChatAttachment(String ticketId, JTextField caption,
-                                             JButton sendButton, JButton attachButton, JDialog dialog) {
+                                             JButton sendButton, JButton attachButton, Component dialog) {
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("Chọn ảnh hoặc tệp đính kèm (tối đa 10 MB)");
         if (chooser.showOpenDialog(dialog) != JFileChooser.APPROVE_OPTION) return;
@@ -1184,43 +1865,61 @@ public class ClientMainGUI {
 
     private void renderChatMessage(String ticketId, JPanel transcript,
                                    Models.TicketChatMessage chatMessage) {
-        String line = chatMessage.sentAt + " | " + chatMessage.sender + ": " + chatMessage.content
-                + (chatMessage.sender.equalsIgnoreCase(currentUser.username)
-                        ? (chatMessage.read ? " [Đã đọc]" : " [Đã gửi]") : "");
-        addChatMessageCard(ticketId, transcript, line, chatMessage.id,
-                chatMessage.attachmentName, chatMessage.attachmentMimeType);
+        boolean mine = currentUser != null
+                && chatMessage.sender.equalsIgnoreCase(currentUser.username);
+        String deliveryState = mine ? (chatMessage.read ? "Đã đọc" : "Đã gửi") : "";
+        addChatMessageCard(ticketId, transcript, chatMessage.sender, chatMessage.content,
+                chatMessage.sentAt, deliveryState, chatMessage.id, chatMessage.attachmentName,
+                chatMessage.attachmentMimeType);
     }
 
-    private void addChatMessageCard(String ticketId, JPanel transcript, String message,
+    private void addChatMessageCard(String ticketId, JPanel transcript, String sender,
+                                    String message, String sentAt, String deliveryState,
                                     long attachmentId, String attachmentName, String mimeType) {
-        JPanel card = new JPanel();
-        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
-        card.setAlignmentX(Component.LEFT_ALIGNMENT);
-        card.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(225, 230, 238)),
-                new EmptyBorder(8, 8, 8, 8)));
-        card.setBackground(Color.WHITE);
+        boolean mine = currentUser != null && sender.equalsIgnoreCase(currentUser.username);
+        Color bubbleColor = mine ? new Color(224, 242, 254) : new Color(241, 245, 249);
+        JPanel row = new JPanel(new BorderLayout(8, 0));
+        row.setOpaque(false);
+        row.setBorder(new EmptyBorder(5, 8, 5, 8));
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JPanel bubble = new JPanel();
+        bubble.setLayout(new BoxLayout(bubble, BoxLayout.Y_AXIS));
+        bubble.setBackground(bubbleColor);
+        bubble.setBorder(new EmptyBorder(8, 11, 8, 11));
+        bubble.setMaximumSize(new Dimension(420, Integer.MAX_VALUE));
+
+        JLabel senderLabel = new JLabel((mine ? "Bạn" : sender) + "  ·  " + sentAt);
+        senderLabel.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        senderLabel.setForeground(new Color(71, 85, 105));
+        senderLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        bubble.add(senderLabel);
 
         JTextArea messageText = new JTextArea(message);
         messageText.setEditable(false);
         messageText.setLineWrap(true);
         messageText.setWrapStyleWord(true);
         messageText.setBorder(null);
-        messageText.setBackground(Color.WHITE);
+        messageText.setBackground(bubbleColor);
+        messageText.setForeground(new Color(30, 41, 59));
+        messageText.setFont(new Font("Segoe UI", Font.PLAIN, 12));
         messageText.setAlignmentX(Component.LEFT_ALIGNMENT);
-        card.add(messageText);
+        messageText.setMaximumSize(new Dimension(390, Integer.MAX_VALUE));
+        bubble.add(messageText);
 
         if (attachmentId > 0 && attachmentName != null && !attachmentName.isBlank()) {
             JLabel preview = null;
             if (isChatImage(attachmentName, mimeType)) {
                 preview = new JLabel("Đang tải bản xem trước ảnh...");
                 preview.setAlignmentX(Component.LEFT_ALIGNMENT);
-                card.add(preview);
+                bubble.add(Box.createVerticalStrut(5));
+                bubble.add(preview);
             }
             JButton download = createStyledButton("Tải tệp: " + attachmentName,
                     Color.WHITE, new Color(20, 35, 60), 11);
             download.setAlignmentX(Component.LEFT_ALIGNMENT);
-            card.add(download);
+            bubble.add(Box.createVerticalStrut(5));
+            bubble.add(download);
             if (preview == null) {
                 download.addActionListener(e ->
                         downloadChatAttachment(ticketId, attachmentId, attachmentName));
@@ -1231,7 +1930,39 @@ public class ClientMainGUI {
             }
         }
 
-        transcript.add(card);
+        if (!deliveryState.isBlank()) {
+            JLabel state = new JLabel(deliveryState);
+            state.setFont(new Font("Segoe UI", Font.PLAIN, 9));
+            state.setForeground(new Color(100, 116, 139));
+            state.setAlignmentX(Component.LEFT_ALIGNMENT);
+            bubble.add(Box.createVerticalStrut(3));
+            bubble.add(state);
+        }
+
+        if (mine) {
+            row.add(bubble, BorderLayout.EAST);
+        } else {
+            JPanel incoming = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+            incoming.setOpaque(false);
+            JLabel avatar = new JLabel(chatInitials(sender), SwingConstants.CENTER);
+            avatar.setOpaque(true);
+            avatar.setBackground(new Color(219, 234, 254));
+            avatar.setForeground(new Color(30, 64, 175));
+            avatar.setFont(new Font("Segoe UI", Font.BOLD, 10));
+            avatar.setPreferredSize(new Dimension(30, 30));
+            incoming.add(avatar);
+            incoming.add(bubble);
+            row.add(incoming, BorderLayout.WEST);
+        }
+        transcript.add(row);
+    }
+
+    private String chatInitials(String name) {
+        if (name == null || name.isBlank()) return "?";
+        String[] parts = name.trim().split("\\s+");
+        if (parts.length == 1) return parts[0].substring(0, 1).toUpperCase(java.util.Locale.ROOT);
+        return (parts[0].substring(0, 1) + parts[parts.length - 1].substring(0, 1))
+                .toUpperCase(java.util.Locale.ROOT);
     }
 
     private boolean isChatImage(String fileName, String mimeType) {
@@ -1286,6 +2017,15 @@ public class ClientMainGUI {
                     preview.setText("");
                     preview.setIcon(icon);
                     preview.setToolTipText(fileName);
+                    preview.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
+                    preview.addMouseListener(new java.awt.event.MouseAdapter() {
+                        @Override
+                        public void mouseClicked(java.awt.event.MouseEvent event) {
+                            JLabel fullPreview = new JLabel(new ImageIcon(image));
+                            JOptionPane.showMessageDialog(mainFrame, new JScrollPane(fullPreview),
+                                    fileName, JOptionPane.PLAIN_MESSAGE);
+                        }
+                    });
                     download.setEnabled(true);
                     download.addActionListener(e -> saveChatAttachment(attachment));
                 });
@@ -1341,8 +2081,10 @@ public class ClientMainGUI {
             return;
         }
         JPanel transcript = openTicketChats.get(ticketId);
+        if (transcript == null) transcript = inspectorTicketChats.get(ticketId);
         if (transcript == null) return;
-        addChatMessageCard(ticketId, transcript, message, attachmentId, attachmentName, null);
+        addChatMessageCard(ticketId, transcript, "Người gửi", message,
+                java.time.LocalTime.now().withNano(0).toString(), "", attachmentId, attachmentName, null);
         transcript.revalidate();
         transcript.repaint();
         JScrollPane scrollPane = (JScrollPane) SwingUtilities.getAncestorOfClass(
@@ -1356,7 +2098,7 @@ public class ClientMainGUI {
     private JButton chatActionButton;
 
     private void refreshChatUnreadCounts() {
-        if (currentUser == null || clientSocket == null || clientSocket.isClosed()) return;
+        if (currentUser == null || networkService == null || !networkService.isConnected()) return;
         new Thread(() -> {
             try {
                 Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(
@@ -1444,18 +2186,11 @@ public class ClientMainGUI {
         btnConfirm.addActionListener(e -> {
             String selectedTech = (String) cbTech.getSelectedItem();
             F04_AssignTechnician.AssignRequest req = new F04_AssignTechnician.AssignRequest(ticketId, selectedTech, currentUser.username);
-            try {
-                Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_ASSIGN_TECH, "", "", req);
-                synchronized (out) {
-                    out.writeObject(packet);
-                    out.flush();
-                }
-                JOptionPane.showMessageDialog(d, "Đã gửi phân công cho " + selectedTech + "!");
+            Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_ASSIGN_TECH, "", "", req);
+            sendCommandAsync(packet, d, "Lỗi phân công", response -> {
                 d.dispose();
                 refreshTicketsDirectly();
-            } catch (Exception ex) {
-                JOptionPane.showMessageDialog(d, "Lỗi phân công: " + ex.getMessage());
-            }
+            });
         });
 
         d.setContentPane(p);
@@ -1478,11 +2213,13 @@ public class ClientMainGUI {
 
                 File targetDir = new File("client_downloads");
                 java.nio.file.Files.createDirectories(targetDir.toPath());
-                File dest = new File(targetDir, fileResponse.fileName);
+                String localFileName = FileTransferHelper.getOriginalTicketAttachmentName(
+                        ticketId, fileResponse.fileName);
+                File dest = new File(targetDir, localFileName);
                 java.nio.file.Files.write(dest.toPath(), fileResponse.fileBytes);
                 SwingUtilities.invokeLater(() -> {
                     JOptionPane.showMessageDialog(mainFrame,
-                            "Tệp đính kèm đã tải thành công!\n- Tên file: " + fileResponse.fileName + "\n- Lưu tại: " + dest.getAbsolutePath() + "\n- Kích thước: " + fileResponse.fileSize + " bytes",
+                            "Tệp đính kèm đã tải thành công!\n- Tên file: " + localFileName + "\n- Lưu tại: " + dest.getAbsolutePath() + "\n- Kích thước: " + fileResponse.fileSize + " bytes",
                             "F04 - Tải file hoàn tất", JOptionPane.INFORMATION_MESSAGE);
                 });
             } catch (Exception ex) {
@@ -1575,18 +2312,11 @@ public class ClientMainGUI {
                     ticketId, st, pct, txtNote.getText().trim(), currentUser.username, fileName, fileBytes
             );
 
-            try {
-                Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_UPDATE_STATUS, "", "", req);
-                synchronized (out) {
-                    out.writeObject(packet);
-                    out.flush();
-                }
-                JOptionPane.showMessageDialog(d, "Cập nhật tiến độ " + pct + "% thành công!", "F05 - Hoàn tất", JOptionPane.INFORMATION_MESSAGE);
+            Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_UPDATE_STATUS, "", "", req);
+            sendCommandAsync(packet, d, "Lỗi cập nhật", response -> {
                 d.dispose();
                 refreshTicketsDirectly();
-            } catch (Exception ex) {
-                JOptionPane.showMessageDialog(d, "Lỗi cập nhật: " + ex.getMessage());
-            }
+            });
         });
 
         d.setContentPane(p);
@@ -1603,14 +2333,15 @@ public class ClientMainGUI {
         }
 
         JDialog d = new JDialog(mainFrame, "Quản lý tài khoản & phân quyền (F08)", true);
-        d.setSize(750, 500);
+        d.setSize(850, 500);
         d.setLocationRelativeTo(mainFrame);
 
         JPanel root = new JPanel(new BorderLayout(10, 10));
         root.setBorder(new EmptyBorder(15, 15, 15, 15));
         root.setBackground(LIGHT_BG);
 
-        DefaultTableModel userModel = new DefaultTableModel(new Object[]{"Tên đăng nhập", "Họ tên", "Vai trò", "Trạng thái"}, 0) {
+        DefaultTableModel userModel = new DefaultTableModel(
+                new Object[]{"Tên đăng nhập", "Họ tên", "Vai trò", "Trạng thái", "Phòng ban"}, 0) {
             @Override public boolean isCellEditable(int r, int c) { return false; }
         };
         JTable userTable = new JTable(userModel);
@@ -1628,7 +2359,8 @@ public class ClientMainGUI {
                 SwingUtilities.invokeLater(() -> {
                     userModel.setRowCount(0);
                     for (Models.User user : list) {
-                        userModel.addRow(new Object[]{user.username, user.displayName, user.role, user.status});
+                        userModel.addRow(new Object[]{user.username, user.displayName, user.role, user.status,
+                                user.department});
                     }
                 });
             } catch (Exception ex) {
@@ -1643,7 +2375,7 @@ public class ClientMainGUI {
 
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 5));
         JButton btnAdd = createStyledButton("+ Thêm người dùng", new Color(13, 110, 253), Color.WHITE, 12);
-        JButton btnEdit = createStyledButton("Sửa vai trò", Color.WHITE, new Color(20, 35, 60), 12);
+        JButton btnEdit = createStyledButton("Sửa hồ sơ", Color.WHITE, new Color(20, 35, 60), 12);
         JButton btnLock = createStyledButton("Khóa / Mở khóa", new Color(220, 53, 69), Color.WHITE, 12);
         JButton btnClose = createStyledButton("Đóng", new Color(108, 117, 125), Color.WHITE, 12);
 
@@ -1655,19 +2387,25 @@ public class ClientMainGUI {
             JTextField u = new JTextField();
             JPasswordField p = new JPasswordField();
             JTextField name = new JTextField();
+            JTextField department = new JTextField();
             JComboBox<String> r = new JComboBox<>(new String[]{"requester", "tech", "admin"});
             JPanel form = new JPanel(new GridLayout(0, 1, 4, 4));
             form.add(new JLabel("Tên đăng nhập:")); form.add(u);
             form.add(new JLabel("Mật khẩu:")); form.add(p);
             form.add(new JLabel("Họ tên hiển thị:")); form.add(name);
+            form.add(new JLabel("Phòng ban:")); form.add(department);
             form.add(new JLabel("Vai trò:")); form.add(r);
 
             if (JOptionPane.showConfirmDialog(d, form, "Thêm tài khoản mới", JOptionPane.OK_CANCEL_OPTION) == JOptionPane.OK_OPTION) {
-                if (u.getText().trim().isEmpty() || p.getPassword().length < 6 || name.getText().trim().isEmpty()) {
-                    JOptionPane.showMessageDialog(d, "Vui lòng nhập đủ thông tin và mật khẩu tối thiểu 6 ký tự.");
+                if (u.getText().trim().isEmpty() || p.getPassword().length < 6 || name.getText().trim().isEmpty()
+                        || ("requester".equals(r.getSelectedItem()) && department.getText().trim().isEmpty())) {
+                    JOptionPane.showMessageDialog(d,
+                            "Vui lòng nhập đủ thông tin; người gửi phải có phòng ban và mật khẩu tối thiểu 6 ký tự.");
                     return;
                 }
-                Models.User newUser = new Models.User(u.getText().trim(), new String(p.getPassword()), name.getText().trim(), (String) r.getSelectedItem(), "Đang hoạt động");
+                Models.User newUser = new Models.User(u.getText().trim(), new String(p.getPassword()),
+                        name.getText().trim(), (String) r.getSelectedItem(), "Đang hoạt động",
+                        department.getText().trim());
                 new Thread(() -> {
                     try {
                         Protocol.Packet response = sendAndReceiveSync(new Protocol.Packet(
@@ -1697,24 +2435,29 @@ public class ClientMainGUI {
             String name = (String) userModel.getValueAt(row, 1);
             String currentRole = (String) userModel.getValueAt(row, 2);
             String currentStatus = (String) userModel.getValueAt(row, 3);
+            String currentDepartment = (String) userModel.getValueAt(row, 4);
 
             JComboBox<String> r = new JComboBox<>(new String[]{"requester", "tech", "admin"});
             r.setSelectedItem(currentRole);
             JTextField txtName = new JTextField(name);
+            JTextField txtDepartment = new JTextField(currentDepartment == null ? "" : currentDepartment);
             JPanel form = new JPanel(new GridLayout(0, 1, 4, 4));
             form.add(new JLabel("Họ tên:")); form.add(txtName);
+            form.add(new JLabel("Phòng ban:")); form.add(txtDepartment);
             form.add(new JLabel("Vai trò:")); form.add(r);
 
             if (JOptionPane.showConfirmDialog(d, form, "Cập nhật vai trò cho " + username, JOptionPane.OK_CANCEL_OPTION) == JOptionPane.OK_OPTION) {
-                Models.User updated = new Models.User(username, "", txtName.getText().trim(), (String) r.getSelectedItem(), currentStatus);
-                try {
-                    Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_UPDATE_USER, "", "", updated);
-                    synchronized (out) { out.writeObject(packet); out.flush(); }
-                    JOptionPane.showMessageDialog(d, "Cập nhật vai trò thành công!");
-                    loadUsers.run();
-                } catch (Exception ex) {
-                    JOptionPane.showMessageDialog(d, "Lỗi sửa: " + ex.getMessage());
+                if ("requester".equals(r.getSelectedItem()) && txtDepartment.getText().trim().isEmpty()) {
+                    JOptionPane.showMessageDialog(d, "Người gửi yêu cầu phải được gán phòng ban.");
+                    return;
                 }
+                Models.User updated = new Models.User(username, "", txtName.getText().trim(),
+                        (String) r.getSelectedItem(), currentStatus, txtDepartment.getText().trim());
+                Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_UPDATE_USER, "", "", updated);
+                sendCommandAsync(packet, d, "Lỗi sửa", response -> {
+                    JOptionPane.showMessageDialog(d, response.message);
+                    loadUsers.run();
+                });
             }
         });
 
@@ -1732,14 +2475,11 @@ public class ClientMainGUI {
             String action = shouldLock ? "Khóa" : "Mở khóa";
             if (JOptionPane.showConfirmDialog(d, action + " tài khoản '" + username + "'?", "Xác nhận", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
                 F08_UserManagement.LockUserRequest req = new F08_UserManagement.LockUserRequest(currentUser.username, username, shouldLock);
-                try {
-                    Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_LOCK_USER, "", "", req);
-                    synchronized (out) { out.writeObject(packet); out.flush(); }
-                    JOptionPane.showMessageDialog(d, action + " tài khoản thành công!");
+                Protocol.Packet packet = new Protocol.Packet(Protocol.CMD_LOCK_USER, "", "", req);
+                sendCommandAsync(packet, d, "Lỗi khóa tài khoản", response -> {
+                    JOptionPane.showMessageDialog(d, response.message);
                     loadUsers.run();
-                } catch (Exception ex) {
-                    JOptionPane.showMessageDialog(d, "Lỗi: " + ex.getMessage());
-                }
+                });
             }
         });
 
@@ -1753,16 +2493,10 @@ public class ClientMainGUI {
     }
 
     private void logout() {
-        isListening = false;
-        isReconnecting.set(false);
-        if (heartbeatExecutor != null) heartbeatExecutor.shutdownNow();
-        if (reconnectPassword != null) {
-            java.util.Arrays.fill(reconnectPassword, '\0');
-            reconnectPassword = null;
+        if (networkService != null) {
+            networkService.close();
+            networkService = null;
         }
-        try {
-            if (clientSocket != null && !clientSocket.isClosed()) clientSocket.close();
-        } catch (IOException ignored) {}
         currentUser = null;
         showLoginWindow();
     }

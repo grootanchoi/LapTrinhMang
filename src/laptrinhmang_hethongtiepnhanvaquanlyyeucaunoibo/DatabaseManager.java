@@ -5,8 +5,6 @@ import java.sql.*;
 import java.time.LocalDateTime;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.DayOfWeek;
-import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,6 +24,8 @@ public class DatabaseManager {
     private String dbUrl = "jdbc:mariadb://localhost:3306/workdesk_db?connectionCollation=utf8mb4_unicode_ci";
     private String dbUser = "root";
     private String dbPassword = "";
+    private static final DateTimeFormatter TICKET_DATE_TIME_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     // Local Datastore fallback
     private final Map<String, Models.User> localUsers = new ConcurrentHashMap<>();
@@ -49,19 +49,23 @@ public class DatabaseManager {
 
     private void initLocalSampleData() {
         // Tài khoản mẫu
-        localUsers.put("admin", new Models.User("admin", PasswordHasher.hash("admin123"), "Quản trị viên hệ thống", "admin", "Đang hoạt động"));
-        localUsers.put("tech01", new Models.User("tech01", PasswordHasher.hash("tech123"), "Nguyễn Văn Kỹ Thuật", "tech", "Đang hoạt động"));
-        localUsers.put("tech02", new Models.User("tech02", PasswordHasher.hash("tech123"), "Trần Thị Support", "tech", "Đang hoạt động"));
-        localUsers.put("user01", new Models.User("user01", PasswordHasher.hash("user123"), "Lê Văn Nhân Viên", "requester", "Đang hoạt động"));
-        localUsers.put("user02", new Models.User("user02", PasswordHasher.hash("user123"), "Phạm Thị Kế Toán", "requester", "Đang hoạt động"));
+        localUsers.put("admin", new Models.User("admin", PasswordHasher.hash("admin123"), "Quản trị viên hệ thống", "admin", "Đang hoạt động", "IT"));
+        localUsers.put("tech01", new Models.User("tech01", PasswordHasher.hash("tech123"), "Nguyễn Văn Kỹ Thuật", "tech", "Đang hoạt động", "IT"));
+        localUsers.put("tech02", new Models.User("tech02", PasswordHasher.hash("tech123"), "Trần Thị Support", "tech", "Đang hoạt động", "IT"));
+        localUsers.put("user01", new Models.User("user01", PasswordHasher.hash("user123"), "Lê Văn Nhân Viên", "requester", "Đang hoạt động", "IT"));
+        localUsers.put("user02", new Models.User("user02", PasswordHasher.hash("user123"), "Phạm Thị Kế Toán", "requester", "Đang hoạt động", "Kế toán"));
 
         // Yêu cầu mẫu
         Models.Ticket t1 = new Models.Ticket("YC-2026-0001", "Máy in phòng Kế toán không nhận lệnh in", "Hành chính", "Cao",
                 "2026-10-20", "Đang xử lý", "user02", "tech01",
                 "Máy in Canon 2900 báo ngoại tuyến liên tục, đã khởi động lại nhưng không được.", 40, "error_printer.txt");
+        t1.ownerDepartment = "Kế toán";
+        t1.createdAt = "2026-10-20T08:00:00";
         Models.Ticket t2 = new Models.Ticket("YC-2026-0002", "Xin cấp quyền truy cập VPN nội bộ", "IT", "Bình thường",
                 "2026-10-21", "Mới", "user01", "Chưa phân công",
                 "Cần tài khoản VPN kết nối máy chủ dữ liệu từ xa.", 0, "");
+        t2.ownerDepartment = "IT";
+        t2.createdAt = "2026-10-21T08:00:00";
 
         localTickets.put(t1.id, t1);
         localTickets.put(t2.id, t2);
@@ -73,6 +77,7 @@ public class DatabaseManager {
             try (Connection conn = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
                 if (conn != null && !conn.isClosed()) {
                     migrateUserStatusColumn(conn);
+                    ensureUserDepartmentColumn(conn);
                     ensureTicketChatTable(conn);
                     ensureTicketManagementColumns(conn);
                     useMySQL = true;
@@ -90,6 +95,15 @@ public class DatabaseManager {
         try (Statement st = conn.createStatement()) {
             st.executeUpdate("ALTER TABLE users MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'Đang hoạt động'");
             st.executeUpdate("UPDATE users SET status = 'Đang hoạt động' WHERE status IS NULL OR status = ''");
+        }
+    }
+
+    private void ensureUserDepartmentColumn(Connection conn) throws SQLException {
+        try (ResultSet columns = conn.getMetaData().getColumns(conn.getCatalog(), null, "users", "department")) {
+            if (columns.next()) return;
+        }
+        try (Statement statement = conn.createStatement()) {
+            statement.executeUpdate("ALTER TABLE users ADD COLUMN department VARCHAR(100) NOT NULL DEFAULT ''");
         }
     }
 
@@ -134,6 +148,17 @@ public class DatabaseManager {
         ensureColumn(conn, "sla_warning_sent", "BOOLEAN NOT NULL DEFAULT FALSE");
         ensureColumn(conn, "sla_overdue_sent", "BOOLEAN NOT NULL DEFAULT FALSE");
         ensureColumn(conn, "deleted_at", "DATETIME NULL");
+        ensureColumn(conn, "created_at", "DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'");
+        ensureColumn(conn, "owner_department", "VARCHAR(100) NOT NULL DEFAULT ''");
+        ensureColumn(conn, "source_ip", "VARCHAR(45) NOT NULL DEFAULT ''");
+        try (Statement statement = conn.createStatement()) {
+            statement.executeUpdate("UPDATE tickets SET created_at = COALESCE("
+                    + "STR_TO_DATE(CONCAT(created_date, ' 08:00:00'), '%Y-%m-%d %H:%i:%s'), "
+                    + "'1970-01-01 00:00:00') WHERE created_at = '1970-01-01 00:00:00'");
+            statement.executeUpdate("UPDATE tickets t JOIN users u ON u.username = t.owner "
+                    + "SET t.owner_department = u.department "
+                    + "WHERE t.owner_department = '' AND u.department <> ''");
+        }
         String select = "SELECT id, priority, created_date FROM tickets WHERE sla_due_at IS NULL";
         try (Statement statement = conn.createStatement(); ResultSet rs = statement.executeQuery(select);
                 PreparedStatement update = conn.prepareStatement("UPDATE tickets SET sla_due_at = ? WHERE id = ?")) {
@@ -173,7 +198,7 @@ public class DatabaseManager {
     // ==================== F01: ĐĂNG NHẬP & XÁC THỰC ====================
     public Models.User authenticate(String username, String password) {
         if (useMySQL) {
-            String sql = "SELECT username, password, display_name, role, status FROM users WHERE username = ?";
+            String sql = "SELECT username, password, display_name, role, status, department FROM users WHERE username = ?";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, username);
                 try (ResultSet rs = ps.executeQuery()) {
@@ -188,7 +213,8 @@ public class DatabaseManager {
                                 rs.getString("password"),
                                 rs.getString("display_name"),
                                 rs.getString("role"),
-                                rs.getString("status")
+                                rs.getString("status"),
+                                rs.getString("department")
                         );
                     }
                 }
@@ -222,13 +248,13 @@ public class DatabaseManager {
     public Models.User getUserByUsername(String username) {
         if (username == null || username.trim().isEmpty()) return null;
         if (useMySQL) {
-            String sql = "SELECT username, display_name, role, status FROM users WHERE username = ?";
+            String sql = "SELECT username, display_name, role, status, department FROM users WHERE username = ?";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, username);
                 try (ResultSet rs = ps.executeQuery()) {
                     if (rs.next()) {
                         return new Models.User(rs.getString("username"), "", rs.getString("display_name"),
-                                rs.getString("role"), rs.getString("status"));
+                                rs.getString("role"), rs.getString("status"), rs.getString("department"));
                     }
                     return null;
                 }
@@ -238,7 +264,8 @@ public class DatabaseManager {
             }
         }
         Models.User user = localUsers.get(username);
-        return user == null ? null : new Models.User(user.username, "", user.displayName, user.role, user.status);
+        return user == null ? null : new Models.User(user.username, "", user.displayName, user.role,
+                user.status, user.department);
     }
 
     // ==================== F02: TẠO YÊU CẦU ====================
@@ -257,25 +284,11 @@ public class DatabaseManager {
     }
 
     public boolean insertTicket(Models.Ticket ticket) {
-        if (ticket.slaDueAt == null || ticket.slaDueAt.isBlank()) {
-            ticket.slaDueAt = BusinessHours.addWorkingHours(LocalDateTime.now(), slaHours(ticket.priority)).toString();
-        }
+        prepareTicketForInsert(ticket);
         if (useMySQL) {
-            String sql = "INSERT INTO tickets (id, title, category, priority, created_date, status, owner, assigned_tech, detail, progress, attachment_name, sla_due_at) "
-                       + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            String sql = ticketInsertSql();
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, ticket.id);
-                ps.setString(2, ticket.title);
-                ps.setString(3, ticket.category);
-                ps.setString(4, ticket.priority);
-                ps.setString(5, ticket.createdDate);
-                ps.setString(6, ticket.status);
-                ps.setString(7, ticket.owner);
-                ps.setString(8, ticket.assignedTech);
-                ps.setString(9, ticket.detail);
-                ps.setInt(10, ticket.progress);
-                ps.setString(11, ticket.attachmentName);
-                ps.setTimestamp(12, Timestamp.valueOf(LocalDateTime.parse(ticket.slaDueAt)));
+                bindTicketInsert(ps, ticket);
                 return ps.executeUpdate() > 0;
             } catch (SQLException e) {
                 System.err.println("[DatabaseManager] Lỗi insert MySQL: " + e.getMessage());
@@ -285,17 +298,133 @@ public class DatabaseManager {
         return true;
     }
 
+    public enum TicketCreateResult { CREATED, QUOTA_EXCEEDED, FAILED }
+
+    public synchronized TicketCreateResult insertRequesterTicketWithinLimit(Models.Ticket ticket, int limit) {
+        prepareTicketForInsert(ticket);
+        if (useMySQL) {
+            String countSql = "SELECT COUNT(*) FROM tickets "
+                    + "WHERE owner = ? AND created_at >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 24 HOUR)";
+            try (Connection conn = getConnection()) {
+                conn.setAutoCommit(false);
+                try {
+                    try (PreparedStatement lock = conn.prepareStatement(
+                            "SELECT username FROM users WHERE username = ? FOR UPDATE")) {
+                        lock.setString(1, ticket.owner);
+                        try (ResultSet rs = lock.executeQuery()) {
+                            if (!rs.next()) {
+                                conn.rollback();
+                                return TicketCreateResult.FAILED;
+                            }
+                        }
+                    }
+                    try (PreparedStatement count = conn.prepareStatement(countSql)) {
+                        count.setString(1, ticket.owner);
+                        try (ResultSet rs = count.executeQuery()) {
+                            if (rs.next() && rs.getInt(1) >= limit) {
+                                conn.rollback();
+                                return TicketCreateResult.QUOTA_EXCEEDED;
+                            }
+                        }
+                    }
+                    try (PreparedStatement insert = conn.prepareStatement(ticketInsertSql())) {
+                        bindTicketInsert(insert, ticket);
+                        if (insert.executeUpdate() == 0) {
+                            conn.rollback();
+                            return TicketCreateResult.FAILED;
+                        }
+                    }
+                    conn.commit();
+                    return TicketCreateResult.CREATED;
+                } catch (SQLException e) {
+                    conn.rollback();
+                    throw e;
+                }
+            } catch (SQLException e) {
+                System.err.println("[DatabaseManager] Lỗi tạo ticket có kiểm soát quota: " + e.getMessage());
+                return TicketCreateResult.FAILED;
+            }
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime windowStart = now.minusHours(24);
+        long recentTickets = localTickets.values().stream()
+                .filter(existing -> ticket.owner.equalsIgnoreCase(existing.owner))
+                .filter(existing -> {
+                    LocalDateTime created = ticketCreatedAt(existing);
+                    return created != null && !created.isBefore(windowStart) && !created.isAfter(now);
+                })
+                .count();
+        if (recentTickets >= limit) return TicketCreateResult.QUOTA_EXCEEDED;
+        ticket.createdAt = now.format(TICKET_DATE_TIME_FORMAT);
+        localTickets.put(ticket.id, ticket);
+        return TicketCreateResult.CREATED;
+    }
+
+    private void prepareTicketForInsert(Models.Ticket ticket) {
+        if (ticket.createdAt == null || ticket.createdAt.isBlank()) {
+            ticket.createdAt = LocalDateTime.now().format(TICKET_DATE_TIME_FORMAT);
+        }
+        if (ticket.slaDueAt == null || ticket.slaDueAt.isBlank()) {
+            ticket.slaDueAt = BusinessHours.addWorkingHours(LocalDateTime.now(), slaHours(ticket.priority)).toString();
+        }
+    }
+
+    private static LocalDateTime ticketCreatedAt(Models.Ticket ticket) {
+        try {
+            return ticket.createdAt == null || ticket.createdAt.isBlank()
+                    ? java.time.LocalDate.parse(ticket.createdDate).atStartOfDay()
+                    : parseTicketDateTime(ticket.createdAt);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static LocalDateTime parseTicketDateTime(String value) {
+        try {
+            return LocalDateTime.parse(value, TICKET_DATE_TIME_FORMAT);
+        } catch (java.time.format.DateTimeParseException e) {
+            return LocalDateTime.parse(value);
+        }
+    }
+
+    private static String ticketInsertSql() {
+        return "INSERT INTO tickets (id, title, category, priority, created_date, created_at, status, owner, "
+                + "assigned_tech, detail, progress, attachment_name, sla_due_at, owner_department, source_ip) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    }
+
+    private static void bindTicketInsert(PreparedStatement ps, Models.Ticket ticket) throws SQLException {
+        ps.setString(1, ticket.id);
+        ps.setString(2, ticket.title);
+        ps.setString(3, ticket.category);
+        ps.setString(4, ticket.priority);
+        ps.setString(5, ticket.createdDate);
+        ps.setTimestamp(6, Timestamp.valueOf(parseTicketDateTime(ticket.createdAt)));
+        ps.setString(7, ticket.status);
+        ps.setString(8, ticket.owner);
+        ps.setString(9, ticket.assignedTech);
+        ps.setString(10, ticket.detail);
+        ps.setInt(11, ticket.progress);
+        ps.setString(12, ticket.attachmentName);
+        ps.setTimestamp(13, Timestamp.valueOf(LocalDateTime.parse(ticket.slaDueAt)));
+        ps.setString(14, ticket.ownerDepartment == null ? "" : ticket.ownerDepartment);
+        ps.setString(15, ticket.sourceIp == null ? "" : ticket.sourceIp);
+    }
+
     // ==================== F03: XEM DANH SÁCH & CHI TIẾT ====================
     public List<Models.Ticket> getTicketsForUser(String username, String role) {
         List<Models.Ticket> list = new ArrayList<>();
         if (useMySQL) {
             String sql;
             if ("admin".equalsIgnoreCase(role)) {
-                sql = "SELECT * FROM tickets WHERE deleted_at IS NULL ORDER BY id DESC";
+                sql = ticketSelectWithLatestNote() + " WHERE t.deleted_at IS NULL ORDER BY t.id DESC";
             } else if ("tech".equalsIgnoreCase(role)) {
-                sql = "SELECT * FROM tickets WHERE deleted_at IS NULL AND (assigned_tech = ? OR status = 'Mới') ORDER BY id DESC";
+                sql = ticketSelectWithLatestNote()
+                        + " WHERE t.deleted_at IS NULL AND t.assigned_tech = ? ORDER BY t.id DESC";
             } else {
-                sql = "SELECT * FROM tickets WHERE deleted_at IS NULL AND owner = ? ORDER BY id DESC";
+                sql = ticketSelectWithLatestNote()
+                        + " WHERE t.deleted_at IS NULL AND t.owner = ? ORDER BY t.id DESC";
             }
 
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -319,7 +448,7 @@ public class DatabaseManager {
             if ("admin".equalsIgnoreCase(role)) {
                 list.add(t);
             } else if ("tech".equalsIgnoreCase(role)) {
-                if (username.equalsIgnoreCase(t.assignedTech) || "Mới".equalsIgnoreCase(t.status)) {
+                if (username.equalsIgnoreCase(t.assignedTech)) {
                     list.add(t);
                 }
             } else {
@@ -339,14 +468,14 @@ public class DatabaseManager {
         String cat = category == null ? "" : category.trim();
         String pri = priority == null ? "" : priority.trim();
         if (useMySQL) {
-            StringBuilder sql = new StringBuilder("SELECT * FROM tickets WHERE deleted_at IS NULL");
-            if ("requester".equalsIgnoreCase(role)) sql.append(" AND owner = ?");
-            else if ("tech".equalsIgnoreCase(role)) sql.append(" AND (assigned_tech = ? OR status = 'Mới')");
+            StringBuilder sql = new StringBuilder(ticketSelectWithLatestNote()).append(" WHERE t.deleted_at IS NULL");
+            if ("requester".equalsIgnoreCase(role)) sql.append(" AND t.owner = ?");
+            else if ("tech".equalsIgnoreCase(role)) sql.append(" AND t.assigned_tech = ?");
             if (!q.isEmpty()) sql.append(" AND (id LIKE ? OR title LIKE ? OR category LIKE ? OR detail LIKE ? OR owner LIKE ? OR assigned_tech LIKE ?)");
-            if (!st.isEmpty()) sql.append(" AND status = ?");
-            if (!cat.isEmpty()) sql.append(" AND category = ?");
-            if (!pri.isEmpty()) sql.append(" AND priority = ?");
-            sql.append(" ORDER BY created_date DESC, id DESC");
+            if (!st.isEmpty()) sql.append(" AND t.status = ?");
+            if (!cat.isEmpty()) sql.append(" AND t.category = ?");
+            if (!pri.isEmpty()) sql.append(" AND t.priority = ?");
+            sql.append(" ORDER BY t.created_date DESC, t.id DESC");
             try (Connection c = getConnection(); PreparedStatement ps = c.prepareStatement(sql.toString())) {
                 int i = 1;
                 if ("requester".equalsIgnoreCase(role) || "tech".equalsIgnoreCase(role)) ps.setString(i++, username);
@@ -378,7 +507,7 @@ public class DatabaseManager {
             String access = "";
             access = " WHERE deleted_at IS NULL";
             if ("requester".equalsIgnoreCase(role)) access += " AND owner = ?";
-            else if ("tech".equalsIgnoreCase(role)) access += " AND (assigned_tech = ? OR status = 'Mới')";
+            else if ("tech".equalsIgnoreCase(role)) access += " AND assigned_tech = ?";
             if (!from.isEmpty()) access += (access.isEmpty() ? " WHERE" : " AND") + " created_date >= ?";
             if (!to.isEmpty()) access += (access.isEmpty() ? " WHERE" : " AND") + " created_date <= ?";
             try (Connection c = getConnection()) {
@@ -418,7 +547,17 @@ public class DatabaseManager {
         ticket.slaWarningSent = rs.getBoolean("sla_warning_sent");
         ticket.slaOverdueSent = rs.getBoolean("sla_overdue_sent");
         ticket.deleted = rs.getTimestamp("deleted_at") != null;
+        Timestamp createdAt = rs.getTimestamp("created_at");
+        ticket.createdAt = createdAt == null ? null : createdAt.toLocalDateTime().format(TICKET_DATE_TIME_FORMAT);
+        ticket.latestNote = rs.getString("latest_note");
+        ticket.ownerDepartment = rs.getString("owner_department");
+        ticket.sourceIp = rs.getString("source_ip");
         return ticket;
+    }
+
+    private static String ticketSelectWithLatestNote() {
+        return "SELECT t.*, (SELECT h.note FROM ticket_history h WHERE h.ticket_id = t.id "
+                + "ORDER BY h.id DESC LIMIT 1) AS latest_note FROM tickets t";
     }
 
     public boolean updateTicketForAdmin(Models.Ticket updated, String actor) {
@@ -538,8 +677,8 @@ public class DatabaseManager {
     public List<Models.Ticket> getSlaCandidates() {
         if (useMySQL) {
             List<Models.Ticket> tickets = new ArrayList<>();
-            String sql = "SELECT * FROM tickets WHERE deleted_at IS NULL "
-                    + "AND status NOT IN ('Hoàn thành', 'Đã hủy') AND sla_due_at IS NOT NULL";
+            String sql = ticketSelectWithLatestNote() + " WHERE t.deleted_at IS NULL "
+                    + "AND t.status NOT IN ('Hoàn thành', 'Đã hủy') AND t.sla_due_at IS NOT NULL";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql);
                     ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) tickets.add(ticketFromResult(rs));
@@ -621,7 +760,7 @@ public class DatabaseManager {
 
     public Models.Ticket getTicketById(String id) {
         if (useMySQL) {
-            String sql = "SELECT * FROM tickets WHERE id = ? AND deleted_at IS NULL";
+            String sql = ticketSelectWithLatestNote() + " WHERE t.id = ? AND t.deleted_at IS NULL";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, id);
                 try (ResultSet rs = ps.executeQuery()) {
@@ -760,14 +899,17 @@ public class DatabaseManager {
                     + "FROM ticket_messages m JOIN tickets t ON t.id = m.ticket_id "
                     + "LEFT JOIN ticket_message_reads r ON r.message_id = m.id AND r.username = ? "
                     + "WHERE m.sender <> ? AND r.message_id IS NULL "
-                    + "AND (? = 'admin' OR t.owner = ? OR t.assigned_tech = ?) "
+                    + "AND (? = 'admin' OR (? = 'requester' AND t.owner = ?) "
+                    + "OR (? = 'tech' AND t.assigned_tech = ?)) "
                     + "GROUP BY m.ticket_id";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, username);
                 ps.setString(2, username);
                 ps.setString(3, role);
-                ps.setString(4, username);
+                ps.setString(4, role);
                 ps.setString(5, username);
+                ps.setString(6, role);
+                ps.setString(7, username);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) counts.put(rs.getString("ticket_id"), rs.getInt("unread_count"));
                 }
@@ -779,8 +921,8 @@ public class DatabaseManager {
         localTicketChat.forEach((ticketId, messages) -> {
             Models.Ticket ticket = localTickets.get(ticketId);
             if (ticket == null || !("admin".equalsIgnoreCase(role)
-                    || username.equalsIgnoreCase(ticket.owner)
-                    || username.equalsIgnoreCase(ticket.assignedTech))) return;
+                    || ("requester".equalsIgnoreCase(role) && username.equalsIgnoreCase(ticket.owner))
+                    || ("tech".equalsIgnoreCase(role) && username.equalsIgnoreCase(ticket.assignedTech)))) return;
             int unread = 0;
             for (Models.TicketChatMessage message : messages) {
                 if (!message.sender.equalsIgnoreCase(username)
@@ -939,6 +1081,7 @@ public class DatabaseManager {
         if (t != null) {
             t.status = newStatus;
             t.progress = progress;
+            t.latestNote = note;
             return true;
         }
         return false;
@@ -984,7 +1127,8 @@ public class DatabaseManager {
                             rs.getString("password"),
                             rs.getString("display_name"),
                             rs.getString("role"),
-                            rs.getString("status")
+                            rs.getString("status"),
+                            rs.getString("department")
                     ));
                 }
                 return list;
@@ -1000,13 +1144,14 @@ public class DatabaseManager {
         String storedPassword = PasswordHasher.isEncoded(user.password)
                 ? user.password : PasswordHasher.hash(user.password);
         if (useMySQL) {
-            String sql = "INSERT INTO users (username, password, display_name, role, status) VALUES (?, ?, ?, ?, ?)";
+            String sql = "INSERT INTO users (username, password, display_name, role, status, department) VALUES (?, ?, ?, ?, ?, ?)";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, user.username);
                 ps.setString(2, storedPassword);
                 ps.setString(3, user.displayName);
                 ps.setString(4, user.role);
                 ps.setString(5, user.status);
+                ps.setString(6, user.department == null ? "" : user.department);
                 return ps.executeUpdate() > 0;
             } catch (SQLException e) {
                 // Chỉ coi lỗi khóa UNIQUE/PRIMARY KEY là trùng username.
@@ -1020,18 +1165,19 @@ public class DatabaseManager {
         }
         if (localUsers.containsKey(user.username)) return false;
         localUsers.put(user.username, new Models.User(user.username, storedPassword,
-                user.displayName, user.role, user.status));
+                user.displayName, user.role, user.status, user.department));
         return true;
     }
 
     public boolean updateUser(Models.User user) {
         if (useMySQL) {
-            String sql = "UPDATE users SET role = ?, status = ?, display_name = ? WHERE username = ?";
+            String sql = "UPDATE users SET role = ?, status = ?, display_name = ?, department = ? WHERE username = ?";
             try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, user.role);
                 ps.setString(2, user.status);
                 ps.setString(3, user.displayName);
-                ps.setString(4, user.username);
+                ps.setString(4, user.department == null ? "" : user.department);
+                ps.setString(5, user.username);
                 return ps.executeUpdate() > 0;
             } catch (SQLException e) {
                 System.err.println("[DatabaseManager] Lỗi update user MySQL: " + e.getMessage());
@@ -1043,6 +1189,7 @@ public class DatabaseManager {
             u.role = user.role;
             u.status = user.status;
             u.displayName = user.displayName;
+            u.department = user.department == null ? "" : user.department;
             return true;
         }
         return false;

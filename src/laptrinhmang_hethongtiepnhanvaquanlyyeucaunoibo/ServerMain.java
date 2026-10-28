@@ -29,6 +29,7 @@ public class ServerMain {
     private boolean isRunning = false;
     private ExecutorService threadPool;
     private ScheduledExecutorService slaMonitor;
+    private java.util.List<NetworkSecurityConfig.Cidr> allowedNetworks = java.util.List.of();
     private final F06_NotificationBroadcaster broadcaster = new F06_NotificationBroadcaster();
 
     // UI Components for Server Control Panel
@@ -145,6 +146,7 @@ public class ServerMain {
     public synchronized void startServer(int port) {
         if (isRunning) return;
         try {
+            allowedNetworks = NetworkSecurityConfig.getAllowedNetworks();
             serverSocket = NetworkSecurityConfig.createServerSocket(port);
             isRunning = true;
             threadPool = Executors.newCachedThreadPool();
@@ -157,6 +159,7 @@ public class ServerMain {
                     : "CẢNH BÁO: TLS đang tắt; lưu lượng mạng chưa được mã hóa.");
             log("Chế độ lưu trữ: " + (DatabaseManager.getInstance().isUsingMySQL() ? "MySQL Server (workdesk_db)" : "Local Datastore (Bộ nhớ tích hợp an toàn)"));
             log("Sẵn sàng lắng nghe kết nối từ các Client (F01-F11)...");
+            log("CIDR được phép: " + System.getenv().getOrDefault("WORKDESK_ALLOWED_CIDRS", "127.0.0.0/8,::1/128 (mặc định localhost)"));
 
             if (statusLabel != null) {
                 statusLabel.setText("TRẠNG THÁI: ĐANG CHẠY (PORT " + port + ")");
@@ -168,6 +171,13 @@ public class ServerMain {
                 while (isRunning && !serverSocket.isClosed()) {
                     try {
                         Socket clientSocket = serverSocket.accept();
+                        if (!NetworkSecurityConfig.isAddressAllowed(
+                                clientSocket.getInetAddress(), allowedNetworks)) {
+                            log("[Từ chối kết nối] IP ngoài CIDR được phép: "
+                                    + clientSocket.getInetAddress().getHostAddress());
+                            clientSocket.close();
+                            continue;
+                        }
                         ClientHandler handler = new ClientHandler(clientSocket);
                         threadPool.execute(handler);
                     } catch (IOException e) {
@@ -327,6 +337,7 @@ public class ServerMain {
             log("[Kết nối mới] Phiên: " + sessionId + " từ " + clientIp);
 
             try {
+                socket.setSoTimeout(30_000);
                 out = new ObjectOutputStream(socket.getOutputStream());
                 out.flush();
                 in = new ObjectInputStream(socket.getInputStream());
@@ -346,6 +357,9 @@ public class ServerMain {
                     log("[Nhận Packet] Từ " + getUsername() + " [" + sessionId + "] -> Lệnh: " + packet.command);
                     long startedAt = System.nanoTime();
                     Protocol.Packet responsePacket = dispatchCommand(packet);
+                    if (responsePacket != null) {
+                        responsePacket.correlationId = packet.correlationId;
+                    }
                     metrics.recordCommand(System.nanoTime() - startedAt,
                             responsePacket == null || Protocol.STATUS_ERROR.equals(responsePacket.status));
                     SwingUtilities.invokeLater(ServerMain.this::refreshMetricsUI);
@@ -358,6 +372,8 @@ public class ServerMain {
                         }
                     }
                 }
+            } catch (SocketTimeoutException e) {
+                log("[Hết thời gian chờ] Đóng phiên không hoạt động " + sessionId + " từ " + clientIp);
             } catch (EOFException | SocketException e) {
                 // Client ngắt kết nối bình thường
             } catch (Exception e) {
@@ -387,24 +403,17 @@ public class ServerMain {
 
             switch (packet.command) {
                 case Protocol.CMD_LOGIN: {
-                    // F01: Đăng nhập & Xác thực
-                    Protocol.Packet resp = F01_Authentication.handleServerLogin(packet);
-                    if (Protocol.STATUS_SUCCESS.equals(resp.status)) {
-                        F01_Authentication.LoginResponse lr = (F01_Authentication.LoginResponse) resp.data;
-                        this.authenticatedUser = lr.user;
-                        DatabaseManager.getInstance().recordAuditEvent("USER_LOGIN",
-                                authenticatedUser.username, authenticatedUser.username, "Đăng nhập thành công.");
-                        log("[F01] Đăng nhập thành công: " + authenticatedUser.username + " (" + authenticatedUser.role + ")");
-                        refreshTableSession(true);
-                        updateSessionUI();
-                    }
-                    return resp;
+                    return handleLogin(packet);
                 }
 
                 case Protocol.CMD_CREATE_TICKET: {
                     // F02: Tạo yêu cầu hỗ trợ kỹ thuật
                     if (!isAllowedRole("requester")) return permissionDenied(packet);
-                    Protocol.Packet resp = F02_CreateTicket.handleServerCreateTicket(packet, authenticatedUser, broadcaster);
+                    String sourceIp = socket.getInetAddress().getHostAddress();
+                    int scopeSeparator = sourceIp.indexOf('%');
+                    if (scopeSeparator >= 0) sourceIp = sourceIp.substring(0, scopeSeparator);
+                    Protocol.Packet resp = F02_CreateTicket.handleServerCreateTicket(
+                            packet, authenticatedUser, broadcaster, sourceIp);
                     log("[F02] " + resp.message);
                     return resp;
                 }
@@ -494,7 +503,18 @@ public class ServerMain {
                 case Protocol.CMD_LOCK_USER: {
                     // F08: Khóa / mở khóa tài khoản
                     if (!isAllowedRole("admin")) return permissionDenied(packet);
-                    return F08_UserManagement.handleServerLockUser(packet, this.authenticatedUser);
+                    Protocol.Packet response =
+                            F08_UserManagement.handleServerLockUser(packet, this.authenticatedUser);
+                    if (Protocol.STATUS_SUCCESS.equals(response.status)
+                            && packet.data instanceof F08_UserManagement.LockUserRequest request
+                            && request.lock) {
+                        String message = "Tài khoản '" + request.targetUsername
+                                + "' đã bị khóa bởi quản trị viên. Phiên đăng nhập đã bị kết thúc.";
+                        log("[F08] " + message);
+                        broadcaster.terminateUserSessions(request.targetUsername, message);
+                        updateSessionUI();
+                    }
+                    return response;
                 }
 
                 case Protocol.CMD_UPDATE_TICKET: {
@@ -520,6 +540,32 @@ public class ServerMain {
                 default:
                     return Protocol.Packet.error(packet.command, "Lệnh không được hỗ trợ: " + packet.command);
             }
+        }
+
+        private Protocol.Packet handleLogin(Protocol.Packet packet) {
+            Protocol.Packet response = F01_Authentication.handleServerLogin(packet);
+            if (!Protocol.STATUS_SUCCESS.equals(response.status)) return response;
+
+            F01_Authentication.LoginResponse login =
+                    (F01_Authentication.LoginResponse) response.data;
+            synchronized (ServerMain.this) {
+                if (broadcaster.hasActiveSession(login.user.username, sessionId)) {
+                    String ip = socket.getInetAddress().getHostAddress();
+                    log("[CẢNH BÁO] Từ chối đăng nhập trùng tài khoản '" + login.user.username
+                            + "' từ " + ip + "; tài khoản đang có phiên hoạt động.");
+                    return Protocol.Packet.error(Protocol.CMD_LOGIN,
+                            "Tài khoản này đang đăng nhập trên một máy khác. Hãy đăng xuất phiên hiện tại trước.");
+                }
+
+                authenticatedUser = login.user;
+            }
+            DatabaseManager.getInstance().recordAuditEvent("USER_LOGIN",
+                    authenticatedUser.username, authenticatedUser.username, "Đăng nhập thành công.");
+            log("[F01] Đăng nhập thành công: " + authenticatedUser.username
+                    + " (" + authenticatedUser.role + ")");
+            refreshTableSession(true);
+            updateSessionUI();
+            return response;
         }
 
         private boolean isAllowedRole(String... allowedRoles) {

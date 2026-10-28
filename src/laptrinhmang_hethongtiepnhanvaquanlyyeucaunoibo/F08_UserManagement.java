@@ -64,7 +64,7 @@ public class F08_UserManagement {
         // Xóa mật khẩu trước khi gửi về client vì lý do bảo mật
         List<Models.User> sanitized = new ArrayList<>();
         for (Models.User u : users) {
-            sanitized.add(new Models.User(u.username, "******", u.displayName, u.role, u.status));
+            sanitized.add(new Models.User(u.username, "******", u.displayName, u.role, u.status, u.department));
         }
 
         return Protocol.Packet.success(Protocol.CMD_GET_USERS, "Lấy danh sách người dùng thành công.", sanitized);
@@ -97,6 +97,12 @@ public class F08_UserManagement {
         }
         if (!isValidStatus(newUser.status)) {
             return Protocol.Packet.error(Protocol.CMD_ADD_USER, "Trạng thái tài khoản không hợp lệ.");
+        }
+        if (!isValidDepartment(newUser.department)
+                || ("requester".equalsIgnoreCase(newUser.role)
+                && (newUser.department == null || newUser.department.isBlank()))) {
+            return Protocol.Packet.error(Protocol.CMD_ADD_USER,
+                    "Người gửi yêu cầu phải có phòng ban (tối đa 100 ký tự).");
         }
 
         DatabaseManager db = DatabaseManager.getInstance();
@@ -133,6 +139,12 @@ public class F08_UserManagement {
                 || !isValidRole(user.role) || !isValidStatus(user.status)) {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_USER, "Tên, họ tên, vai trò hoặc trạng thái không hợp lệ.");
         }
+        if (!isValidDepartment(user.department)
+                || ("requester".equalsIgnoreCase(user.role)
+                && (user.department == null || user.department.isBlank()))) {
+            return Protocol.Packet.error(Protocol.CMD_UPDATE_USER,
+                    "Người gửi yêu cầu phải có phòng ban (tối đa 100 ký tự).");
+        }
 
         DatabaseManager db = DatabaseManager.getInstance();
         boolean ok = db.updateUser(user);
@@ -152,6 +164,10 @@ public class F08_UserManagement {
 
     private static boolean isValidStatus(String status) {
         return "Đang hoạt động".equalsIgnoreCase(status) || "Đã khóa".equalsIgnoreCase(status);
+    }
+
+    private static boolean isValidDepartment(String department) {
+        return department == null || department.trim().length() <= 100;
     }
 
     /**

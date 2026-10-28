@@ -4,9 +4,11 @@ echo ========================================================
 echo DANG BIEN DICH DU AN VOI JDK (UTF-8)...
 echo ========================================================
 set "JAVAC_EXE="
-for /f "delims=" %%J in ('where javac') do if not defined JAVAC_EXE set "JAVAC_EXE=%%J"
+if defined JAVA_HOME if exist "%JAVA_HOME%\bin\javac.exe" set "JAVAC_EXE=%JAVA_HOME%\bin\javac.exe"
+if not defined JAVAC_EXE for /f "delims=" %%J in ('where javac 2^>nul') do if not defined JAVAC_EXE set "JAVAC_EXE=%%J"
+if not defined JAVAC_EXE if exist "%ProgramFiles%\Apache NetBeans\jdk\bin\javac.exe" set "JAVAC_EXE=%ProgramFiles%\Apache NetBeans\jdk\bin\javac.exe"
 if not defined JAVAC_EXE (
-    echo [LOI] Khong tim thay JDK 21+ trong PATH.
+    echo [LOI] Khong tim thay JDK 21+. Hay cai JDK hoac cau hinh JAVA_HOME/PATH.
     pause
     exit /b 1
 )

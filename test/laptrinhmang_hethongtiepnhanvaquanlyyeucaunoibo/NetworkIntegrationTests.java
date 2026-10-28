@@ -15,6 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.UUID;
 
 /** Standalone regression tests for F01/F08/F11 and real multi-client TCP behavior. */
 public final class NetworkIntegrationTests {
@@ -29,6 +30,7 @@ public final class NetworkIntegrationTests {
 
         testPasswordHashing();
         testBusinessHoursSla();
+        testNetworkAccessPolicy();
         DatabaseManager db = DatabaseManager.getInstance();
         testPasswordPersistence(db);
         ServerMain server = new ServerMain();
@@ -44,12 +46,16 @@ public final class NetworkIntegrationTests {
             clients.add(admin);
 
             testRoleAuthorization(requester, technician, admin);
+            testF05ResultAttachment(db, requester, technician);
+            testSessionPolicies(port, requester, technician, admin);
+            testCorrelatedConcurrentRequests(db, port);
+            testTicketQuotaAndMetadata(db, port, admin);
             testAdminTicketManagement(db, requester, technician, admin);
             testSlaAlerts(db, server, requester, technician);
             testChatAttachment(requester, technician);
             testChatReadStatus(db, requester, technician);
             testHeartbeat(requester);
-            testConcurrentClients(port, requester, technician);
+            testConcurrentClients(port, requester, technician, admin);
             testDisconnectCleanup(server, clients);
 
             check(server.getMetrics().getProcessedCommands() >= 15, "server counts processed commands");
@@ -85,13 +91,190 @@ public final class NetworkIntegrationTests {
 
     private static void testPasswordPersistence(DatabaseManager db) throws Exception {
         String username = "hash-test-" + java.util.UUID.randomUUID().toString().substring(0, 8);
-        check(db.addUser(new Models.User(username, "test-password", "Hash Test", "requester", "Đang hoạt động")),
+        check(db.addUser(new Models.User(username, "test-password", "Hash Test", "requester",
+                "Đang hoạt động", "QA")),
                 "new test user is stored");
         Models.User stored = db.getAllUsers().stream()
                 .filter(user -> username.equals(user.username)).findFirst().orElseThrow();
         check(PasswordHasher.isEncoded(stored.password), "database never stores new plaintext passwords");
         check(db.authenticate(username, "test-password") != null, "database authenticates hashed password");
         check(db.authenticate(username, "incorrect") == null, "database rejects incorrect password");
+    }
+
+    private static void testNetworkAccessPolicy() throws Exception {
+        List<NetworkSecurityConfig.Cidr> allowed = NetworkSecurityConfig.parseCidrs("192.168.10.0/24,::1/128");
+        check(NetworkSecurityConfig.isAddressAllowed(
+                java.net.InetAddress.getByName("192.168.10.42"), allowed), "CIDR allows an address in the configured subnet");
+        check(!NetworkSecurityConfig.isAddressAllowed(
+                java.net.InetAddress.getByName("192.168.11.42"), allowed), "CIDR rejects an address outside the configured subnet");
+        check(NetworkSecurityConfig.isAddressAllowed(java.net.InetAddress.getByName("::1"), allowed),
+                "CIDR supports IPv6 loopback");
+        boolean rejectedInvalid = false;
+        try {
+            NetworkSecurityConfig.parseCidrs("not-a-cidr");
+        } catch (IllegalArgumentException e) {
+            rejectedInvalid = true;
+        }
+        check(rejectedInvalid, "invalid CIDR configuration is rejected");
+    }
+
+    private static void testTicketQuotaAndMetadata(DatabaseManager db, int port, TestClient admin) throws Exception {
+        String username = "quota-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+        String password = "quota-password";
+        Protocol.Packet missingDepartment = admin.request(new Protocol.Packet(Protocol.CMD_ADD_USER, "", "",
+                new Models.User(username + "-missing", password, "No Department", "requester",
+                        "Đang hoạt động", "")));
+        check(Protocol.STATUS_ERROR.equals(missingDepartment.status),
+                "admin cannot create a requester without a department");
+        Protocol.Packet addUser = admin.request(new Protocol.Packet(Protocol.CMD_ADD_USER, "", "",
+                new Models.User(username, password, "Quota Test", "requester", "Đang hoạt động", "QA")));
+        check(Protocol.STATUS_SUCCESS.equals(addUser.status), "admin can create a requester with a department");
+        Protocol.Packet users = admin.request(new Protocol.Packet(Protocol.CMD_GET_USERS, "", "",
+                new F08_UserManagement.AdminUserRequest("admin", "admin")));
+        check(users.data instanceof List<?> userRows && userRows.stream()
+                .filter(Models.User.class::isInstance)
+                .map(Models.User.class::cast)
+                .anyMatch(user -> username.equals(user.username) && "QA".equals(user.department)),
+                "admin user list includes the stored department");
+        Models.Ticket historicalTicket = new Models.Ticket("YC-Q-" + java.util.UUID.randomUUID().toString().substring(0, 8),
+                "Old quota fixture", "IT", "Thấp", java.time.LocalDate.now().minusDays(2).toString(),
+                "Mới", username, "Chưa phân công", "Older than 24 hours", 0, "");
+        historicalTicket.createdAt = java.time.LocalDateTime.now().minusHours(25).toString();
+        check(db.insertTicket(historicalTicket), "historical ticket fixture is stored");
+        try (TestClient client = connect(port, username, password)) {
+            Models.Ticket firstNewTicket = null;
+            byte[] attachmentBytes = "uploaded from an independent client".getBytes(
+                    java.nio.charset.StandardCharsets.UTF_8);
+            for (int i = 1; i <= 5; i++) {
+                F02_CreateTicket.CreateTicketRequest request = new F02_CreateTicket.CreateTicketRequest(
+                        "Quota test " + i, "IT", "Thấp", "Test quota and metadata", "forged-owner",
+                        i == 1 ? "integration-attachment.txt" : "",
+                        i == 1 ? attachmentBytes : null);
+                Protocol.Packet response = client.request(new Protocol.Packet(
+                        Protocol.CMD_CREATE_TICKET, "", "", request));
+                check(Protocol.STATUS_SUCCESS.equals(response.status), "requester can create ticket " + i + " within quota");
+                Models.Ticket ticket = (Models.Ticket) response.data;
+                if (i == 1) firstNewTicket = ticket;
+                check(ticket.createdAt != null
+                                && ticket.createdAt.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}"),
+                        "new F02 ticket includes a full creation timestamp");
+                check(username.equals(ticket.owner), "ticket owner comes from authenticated account");
+                check("QA".equals(ticket.ownerDepartment), "ticket stores the requester's department snapshot");
+                check("127.0.0.1".equals(ticket.sourceIp), "ticket stores the remote socket IP");
+            }
+            Protocol.Packet downloaded = client.request(new Protocol.Packet(Protocol.CMD_DOWNLOAD_FILE, "", "",
+                    new F04_AssignTechnician.FileDownloadRequest(firstNewTicket.attachmentName,
+                            firstNewTicket.id)));
+            check(Protocol.STATUS_SUCCESS.equals(downloaded.status)
+                            && downloaded.data instanceof F04_AssignTechnician.FileDownloadResponse file
+                            && java.util.Arrays.equals(attachmentBytes, file.fileBytes),
+                    "F02 attachment bytes are sent to and retrievable from the server");
+            check("integration-attachment.txt".equals(
+                            FileTransferHelper.getOriginalTicketAttachmentName(
+                                    firstNewTicket.id, firstNewTicket.attachmentName)),
+                    "downloaded ticket attachment name hides the ticket storage prefix");
+            FileTransferHelper.deleteStoredFile(firstNewTicket.attachmentName);
+
+            F02_CreateTicket.CreateTicketRequest sixthRequest = new F02_CreateTicket.CreateTicketRequest(
+                    "Quota test 6", "IT", "Thấp", "Should exceed quota", username, "");
+            Protocol.Packet rejected = client.request(new Protocol.Packet(
+                    Protocol.CMD_CREATE_TICKET, "", "", sixthRequest));
+            check(Protocol.STATUS_ERROR.equals(rejected.status)
+                    && rejected.message.contains("giới hạn 5"), "sixth ticket within 24 hours is rejected");
+            Protocol.Packet updateUser = admin.request(new Protocol.Packet(Protocol.CMD_UPDATE_USER, "", "",
+                    new Models.User(username, "", "Quota Test", "requester", "Đang hoạt động", "Support")));
+            check(Protocol.STATUS_SUCCESS.equals(updateUser.status)
+                    && "Support".equals(db.getUserByUsername(username).department),
+                    "admin can update a requester's department");
+            check("QA".equals(db.getTicketById(firstNewTicket.id).ownerDepartment),
+                    "existing ticket keeps the department captured when it was created");
+        }
+    }
+
+    private static void testF05ResultAttachment(DatabaseManager db, TestClient requester,
+                                                TestClient technician) throws Exception {
+        String unassignedTicketId = "YC-F05-UNASSIGNED-" + UUID.randomUUID().toString().substring(0, 8);
+        Models.Ticket unassignedTicket = new Models.Ticket(unassignedTicketId, "Unassigned F05 test", "IT", "Thấp",
+                java.time.LocalDate.now().toString(), "Mới", "user02", "Chưa phân công",
+                "Unassigned F05 fixture", 0, "");
+        check(db.insertTicket(unassignedTicket), "unassigned F05 fixture is stored");
+        Protocol.Packet unassignedUpdate = technician.request(new Protocol.Packet(
+                Protocol.CMD_UPDATE_STATUS, "", "",
+                new F05_UpdateProgress.UpdateProgressRequest(unassignedTicketId, "Đang xử lý", 10,
+                        "", "tech01", "", null)));
+        check(Protocol.STATUS_ERROR.equals(unassignedUpdate.status)
+                        && "Yêu cầu chưa được phân công kỹ thuật viên. Vui lòng phân công KTV trước khi cập nhật tiến độ."
+                        .equals(unassignedUpdate.message),
+                "F05 rejects progress updates before technician assignment");
+
+        String ticketId = "YC-F05-" + UUID.randomUUID().toString().substring(0, 8);
+        Models.Ticket ticket = new Models.Ticket(ticketId, "F05 result attachment test", "IT", "Thấp",
+                java.time.LocalDate.now().toString(), "Đang xử lý", "user02", "tech01",
+                "F05 result attachment fixture", 0, "");
+        check(db.insertTicket(ticket), "F05 result attachment fixture is stored");
+        byte[] fileBytes = "final acceptance result".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        String storedFileName = null;
+        try {
+            Protocol.Packet update = technician.request(new Protocol.Packet(Protocol.CMD_UPDATE_STATUS, "", "",
+                    new F05_UpdateProgress.UpdateProgressRequest(ticketId, "Đang xử lý", 75,
+                            "Uploaded final result", "tech01", "acceptance.txt", fileBytes)));
+            check(Protocol.STATUS_SUCCESS.equals(update.status),
+                    "technician can submit an F05 result attachment");
+            Models.NotificationMessage notification = requester.readNotificationMessage(ticketId);
+            check(notification != null && "STATUS_CHANGED".equals(notification.eventType)
+                            && notification.message.contains(" | Ghi chú: Uploaded final result"),
+                    "F05 progress notification includes the technician note");
+            check("Uploaded final result".equals(db.getTicketById(ticketId).latestNote),
+                    "F05 latest technician note is available on ticket details");
+            storedFileName = db.getTicketById(ticketId).attachmentName;
+            check(storedFileName.startsWith(ticketId + "_"),
+                    "F05 result attachment is stored with its ticket ID prefix");
+
+            Protocol.Packet download = technician.request(new Protocol.Packet(Protocol.CMD_DOWNLOAD_FILE, "", "",
+                    new F04_AssignTechnician.FileDownloadRequest(storedFileName, ticketId)));
+            check(Protocol.STATUS_SUCCESS.equals(download.status)
+                            && download.data instanceof F04_AssignTechnician.FileDownloadResponse result
+                            && java.util.Arrays.equals(fileBytes, result.fileBytes),
+                    "F05 result attachment can be downloaded through F04");
+            check("acceptance.txt".equals(FileTransferHelper.getOriginalTicketAttachmentName(
+                            ticketId, storedFileName)),
+                    "F05 result download restores the original filename");
+        } finally {
+            if (storedFileName != null) FileTransferHelper.deleteStoredFile(storedFileName);
+        }
+    }
+
+    private static void testCorrelatedConcurrentRequests(DatabaseManager db, int port) throws Exception {
+        String username = "correlation-" + UUID.randomUUID().toString().substring(0, 8);
+        check(db.addUser(new Models.User(username, "correlation-password", "Correlation Test",
+                "requester", "Đang hoạt động", "QA")), "correlation test account is created");
+        F01_Authentication.ConnectionResult login = F01_Authentication.performLogin(
+                "127.0.0.1", port, username, "correlation-password");
+        check(login.isConnected, "correlation test account can connect");
+
+        ExecutorService workers = Executors.newFixedThreadPool(6);
+        try (NetworkService network = new NetworkService(packet -> {},
+                error -> { throw new IllegalStateException("Unexpected disconnect.", error); }, user -> {})) {
+            network.connect(login.socket, login.in, login.out);
+            List<Future<java.util.Map.Entry<String, Protocol.Packet>>> responses = new ArrayList<>();
+            for (int i = 0; i < 6; i++) {
+                responses.add(workers.submit(() -> {
+                    Protocol.Packet request = new Protocol.Packet(Protocol.CMD_PING, "", "", null);
+                    Protocol.Packet response = network.request(request);
+                    return java.util.Map.entry(request.correlationId, response);
+                }));
+            }
+            for (Future<java.util.Map.Entry<String, Protocol.Packet>> responseFuture : responses) {
+                java.util.Map.Entry<String, Protocol.Packet> correlated = responseFuture.get(
+                        10, TimeUnit.SECONDS);
+                Protocol.Packet response = correlated.getValue();
+                check(Protocol.STATUS_SUCCESS.equals(response.status)
+                                && correlated.getKey().equals(response.correlationId),
+                        "concurrent requests receive their correlated response");
+            }
+        } finally {
+            workers.shutdownNow();
+        }
     }
 
     private static void testRoleAuthorization(TestClient requester, TestClient technician,
@@ -124,6 +307,73 @@ public final class NetworkIntegrationTests {
         check(Protocol.STATUS_ERROR.equals(admin.request(new Protocol.Packet(
                 Protocol.CMD_CREATE_TICKET, "", "", createRequest)).status),
                 "admin cannot create requester tickets");
+
+        Protocol.Packet techTickets = technician.request(new Protocol.Packet(Protocol.CMD_GET_TICKETS, "", "",
+                new F03_ViewTickets.ViewTicketsRequest("tech01", "tech")));
+        check(techTickets.data instanceof List<?> tickets && tickets.stream()
+                .filter(Models.Ticket.class::isInstance)
+                .map(Models.Ticket.class::cast)
+                .allMatch(ticket -> "tech01".equalsIgnoreCase(ticket.assignedTech)),
+                "technician ticket list contains only assigned tickets");
+        Protocol.Packet unassignedDetail = technician.request(new Protocol.Packet(
+                Protocol.CMD_GET_TICKET_DETAIL, "", "", "YC-2026-0002"));
+        check(Protocol.STATUS_ERROR.equals(unassignedDetail.status),
+                "technician cannot open an unassigned ticket");
+        Protocol.Packet unassignedSearch = technician.request(new Protocol.Packet(Protocol.CMD_SEARCH_TICKETS, "", "",
+                new F07_SearchTickets.SearchRequest("YC-2026-0002", "", "", "")));
+        check(unassignedSearch.data instanceof List<?> searchResults
+                        && searchResults.stream().noneMatch(ticket -> ticket instanceof Models.Ticket result
+                        && "YC-2026-0002".equals(result.id)),
+                "technician search does not reveal unassigned tickets");
+        Protocol.Packet unassignedHistory = technician.request(new Protocol.Packet(
+                Protocol.CMD_GET_HISTORY, "", "", "YC-2026-0002"));
+        check(Protocol.STATUS_ERROR.equals(unassignedHistory.status),
+                "technician cannot view history for an unassigned ticket");
+        Protocol.Packet unassignedChat = technician.request(new Protocol.Packet(
+                Protocol.CMD_GET_TICKET_CHAT, "", "",
+                new F11_TicketChat.ChatRequest("YC-2026-0002", "")));
+        check(Protocol.STATUS_ERROR.equals(unassignedChat.status),
+                "technician cannot open chat for an unassigned ticket");
+        Protocol.Packet unassignedFile = technician.request(new Protocol.Packet(Protocol.CMD_DOWNLOAD_FILE, "", "",
+                new F04_AssignTechnician.FileDownloadRequest("sample.txt", "YC-2026-0002")));
+        check(Protocol.STATUS_ERROR.equals(unassignedFile.status),
+                "technician cannot download files for an unassigned ticket");
+        Protocol.Packet statistics = technician.request(new Protocol.Packet(Protocol.CMD_GET_STATISTICS, "", "",
+                new F09_TicketStatistics.StatisticsRequest("", "")));
+        check(statistics.data instanceof F09_TicketStatistics.Statistics summary
+                        && summary.byStatus.stream().noneMatch(row -> "Mới".equalsIgnoreCase(row.groupName))
+                        && summary.byTechnician.stream().allMatch(row -> "tech01".equalsIgnoreCase(row.groupName)),
+                "technician statistics include only assigned tickets");
+    }
+
+    private static void testSessionPolicies(int port, TestClient requester, TestClient technician,
+                                            TestClient admin) throws Exception {
+        Protocol.Packet duplicateLogin = loginAttempt(port, "user02", "user123");
+        check(Protocol.STATUS_ERROR.equals(duplicateLogin.status)
+                        && duplicateLogin.message.contains("đang đăng nhập"),
+                "server rejects a second active login for the same account");
+
+        String username = "lock-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+        Protocol.Packet added = admin.request(new Protocol.Packet(Protocol.CMD_ADD_USER, "", "",
+                new Models.User(username, "lock-password", "Lock Test", "requester",
+                        "Đang hoạt động", "QA")));
+        check(Protocol.STATUS_SUCCESS.equals(added.status), "admin can create account for forced logout test");
+        try (TestClient target = connect(port, username, "lock-password")) {
+            Protocol.Packet locked = admin.request(new Protocol.Packet(Protocol.CMD_LOCK_USER, "", "",
+                    new F08_UserManagement.LockUserRequest("admin", username, true)));
+            check(Protocol.STATUS_SUCCESS.equals(locked.status), "admin can lock the active requester");
+            check(target.readNotificationEvent("SESSION_REVOKED"),
+                    "locked account immediately receives a session-revoked notification");
+            boolean disconnected = false;
+            try {
+                target.request(new Protocol.Packet(Protocol.CMD_PING, "", "", null));
+            } catch (IOException | ClassNotFoundException e) {
+                disconnected = true;
+            }
+            check(disconnected, "server closes the locked account's socket immediately");
+            check(Protocol.STATUS_ERROR.equals(loginAttempt(port, username, "lock-password").status),
+                    "locked account cannot log in again");
+        }
     }
 
     private static void testAdminTicketManagement(DatabaseManager db, TestClient requester,
@@ -215,16 +465,11 @@ public final class NetworkIntegrationTests {
         F01_Authentication.ConnectionResult initial =
                 F01_Authentication.performLogin("127.0.0.1", port, "user02", "user123");
         check(initial.isConnected, "reconnect test client logs in initially");
-        setField(client, "serverHost", "127.0.0.1");
-        setField(client, "serverPort", port);
         setField(client, "currentUser", initial.loggedInUser);
-        setField(client, "clientSocket", initial.socket);
-        setField(client, "out", initial.out);
-        setField(client, "in", initial.in);
-        setField(client, "reconnectPassword", "user123".toCharArray());
-        java.lang.reflect.Method listener = ClientMainGUI.class.getDeclaredMethod("startNotificationListener");
-        listener.setAccessible(true);
-        listener.invoke(client);
+        NetworkService network = new NetworkService(packet -> {}, error -> {}, user -> {});
+        network.setReconnectCredentials("127.0.0.1", port, "user02", "user123");
+        setField(client, "networkService", network);
+        network.connect(initial.socket, initial.in, initial.out);
 
         ServerMain replacement = new ServerMain();
         try {
@@ -234,7 +479,7 @@ public final class NetworkIntegrationTests {
             Socket connectedSocket = initial.socket;
             while (System.nanoTime() < deadline && connectedSocket == initial.socket) {
                 Thread.sleep(100);
-                connectedSocket = (Socket) getField(client, "clientSocket");
+                connectedSocket = (Socket) getField(network, "socket");
             }
             check(connectedSocket != initial.socket && !connectedSocket.isClosed(),
                     "client automatically reconnects after server restart");
@@ -243,11 +488,7 @@ public final class NetworkIntegrationTests {
             check(Protocol.STATUS_SUCCESS.equals(pong.status), "reconnected client can exchange TCP packets");
         } finally {
             setField(client, "currentUser", null);
-            setField(client, "isListening", false);
-            Object password = getField(client, "reconnectPassword");
-            if (password instanceof char[] secret) java.util.Arrays.fill(secret, '\0');
-            Socket socket = (Socket) getField(client, "clientSocket");
-            if (socket != null) socket.close();
+            network.close();
             replacement.stopServer();
         }
     }
@@ -298,7 +539,7 @@ public final class NetworkIntegrationTests {
     }
 
     private static void testConcurrentClients(int port, TestClient requester,
-                                              TestClient technician) throws Exception {
+                                              TestClient technician, TestClient admin) throws Exception {
         int count = 5;
         ExecutorService workers = Executors.newFixedThreadPool(count);
         CountDownLatch ready = new CountDownLatch(count);
@@ -307,7 +548,14 @@ public final class NetworkIntegrationTests {
         List<Future<Boolean>> results = new ArrayList<>();
         try {
             for (int i = 0; i < count; i++) {
-                TestClient client = connect(port, "tech01", "tech123");
+                String username = "parallel-" + java.util.UUID.randomUUID().toString().substring(0, 8)
+                        + "-" + i;
+                Protocol.Packet added = admin.request(new Protocol.Packet(Protocol.CMD_ADD_USER, "", "",
+                        new Models.User(username, "parallel-password", "Parallel Operator", "admin",
+                                "Đang hoạt động", "IT")));
+                check(Protocol.STATUS_SUCCESS.equals(added.status),
+                        "admin creates a distinct account for each concurrent client");
+                TestClient client = connect(port, username, "parallel-password");
                 concurrentClients.add(client);
                 int sequence = i;
                 results.add(workers.submit(() -> {
@@ -360,6 +608,23 @@ public final class NetworkIntegrationTests {
         throw new IOException("Could not connect test client to server.", lastError);
     }
 
+    private static Protocol.Packet loginAttempt(int port, String username, String password) throws Exception {
+        try (Socket socket = NetworkSecurityConfig.createClientSocket("127.0.0.1", port, 3000)) {
+            socket.setSoTimeout(5000);
+            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+            out.flush();
+            ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+            out.writeObject(new Protocol.Packet(Protocol.CMD_LOGIN, "", "",
+                    new F01_Authentication.LoginRequest(username, password)));
+            out.flush();
+            Object response = in.readObject();
+            if (!(response instanceof Protocol.Packet packet)) {
+                throw new IOException("Server returned an invalid login response.");
+            }
+            return packet;
+        }
+    }
+
     private static int reservePort() throws IOException {
         try (ServerSocket socket = new ServerSocket(0)) {
             return socket.getLocalPort();
@@ -408,6 +673,7 @@ public final class NetworkIntegrationTests {
         }
 
         private synchronized Protocol.Packet request(Protocol.Packet packet) throws Exception {
+            if (packet.correlationId == null) packet.correlationId = UUID.randomUUID().toString();
             synchronized (out) {
                 out.writeObject(packet);
                 out.flush();
@@ -422,17 +688,24 @@ public final class NetworkIntegrationTests {
                     }
                     continue;
                 }
+                if (!packet.correlationId.equals(response.correlationId)) {
+                    throw new IOException("Response correlation ID does not match request.");
+                }
                 return response;
             }
         }
 
         private synchronized boolean readNotification(String ticketId) throws Exception {
+            return readNotificationMessage(ticketId) != null;
+        }
+
+        private synchronized Models.NotificationMessage readNotificationMessage(String ticketId) throws Exception {
             Models.NotificationMessage pending = pendingNotifications.stream()
                     .filter(notification -> ticketId.equals(notification.ticketId))
                     .findFirst().orElse(null);
             if (pending != null) {
                 pendingNotifications.remove(pending);
-                return true;
+                return pending;
             }
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while (System.nanoTime() < deadline) {
@@ -441,7 +714,28 @@ public final class NetworkIntegrationTests {
                 if (received instanceof Protocol.Packet packet
                         && Protocol.CMD_NOTIFICATION.equals(packet.command)
                         && packet.data instanceof Models.NotificationMessage notification
-                        && ticketId.equals(notification.ticketId)) return true;
+                        && ticketId.equals(notification.ticketId)) return notification;
+            }
+            return null;
+        }
+
+        private synchronized boolean readNotificationEvent(String eventType) throws Exception {
+            Models.NotificationMessage pending = pendingNotifications.stream()
+                    .filter(notification -> eventType.equals(notification.eventType))
+                    .findFirst().orElse(null);
+            if (pending != null) {
+                pendingNotifications.remove(pending);
+                return true;
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (System.nanoTime() < deadline) {
+                socket.setSoTimeout((int) Math.max(1,
+                        TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
+                Object received = in.readObject();
+                if (received instanceof Protocol.Packet packet
+                        && Protocol.CMD_NOTIFICATION.equals(packet.command)
+                        && packet.data instanceof Models.NotificationMessage notification
+                        && eventType.equals(notification.eventType)) return true;
             }
             return false;
         }

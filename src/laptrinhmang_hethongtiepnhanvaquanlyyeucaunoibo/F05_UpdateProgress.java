@@ -74,6 +74,10 @@ public class F05_UpdateProgress {
         if (req.progressPercent < 0 || req.progressPercent > 100) {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Tiến độ phải nằm trong khoảng từ 0% đến 100%.");
         }
+        if (req.resultFileBytes != null && req.resultFileBytes.length > FileTransferHelper.MAX_ATTACHMENT_SIZE) {
+            return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS,
+                    "Tệp kết quả không được vượt quá 10 MB.");
+        }
 
         DatabaseManager db = DatabaseManager.getInstance();
         Models.Ticket t = db.getTicketById(req.ticketId);
@@ -81,6 +85,11 @@ public class F05_UpdateProgress {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Không tìm thấy yêu cầu: " + req.ticketId);
         }
 
+        if (t.assignedTech == null || t.assignedTech.isBlank()
+                || "Chưa phân công".equalsIgnoreCase(t.assignedTech)) {
+            return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS,
+                    "Yêu cầu chưa được phân công kỹ thuật viên. Vui lòng phân công KTV trước khi cập nhật tiến độ.");
+        }
         if ("tech".equalsIgnoreCase(user.role) && !user.username.equalsIgnoreCase(t.assignedTech)) {
             return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Chỉ kỹ thuật viên được phân công mới được cập nhật yêu cầu này.");
         }
@@ -92,17 +101,16 @@ public class F05_UpdateProgress {
         }
 
         long bytesReceived = 0;
+        String storedResultFileName = null;
         // 3. Xử lý tệp đính kèm kết quả nếu có (Ghi nhận số byte)
         if (req.resultFileBytes != null && req.resultFileBytes.length > 0 && req.resultFileName != null) {
             bytesReceived = req.resultFileBytes.length;
             try {
-                java.io.File dest = new java.io.File(FileTransferHelper.SERVER_STORAGE_DIR, req.resultFileName);
-                try (java.io.FileOutputStream fos = new java.io.FileOutputStream(dest)) {
-                    fos.write(req.resultFileBytes);
-                }
-                db.updateTicketAttachment(req.ticketId, req.resultFileName);
-            } catch (Exception e) {
-                System.err.println("[F05] Lỗi lưu file đính kèm: " + e.getMessage());
+                storedResultFileName = FileTransferHelper.storeTicketAttachment(
+                        req.ticketId, req.resultFileName, req.resultFileBytes);
+            } catch (java.io.IOException e) {
+                return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS,
+                        "Không thể lưu tệp nghiệm thu trên máy chủ: " + e.getMessage());
             }
         }
 
@@ -115,14 +123,21 @@ public class F05_UpdateProgress {
         // 5. Cập nhật vào CSDL MySQL / Datastore và lưu lịch sử
         boolean ok = db.updateTicketStatus(req.ticketId, effectiveStatus, req.progressPercent, req.note, user.username);
         if (!ok) {
+            deleteStoredResultFile(storedResultFileName);
             return Protocol.Packet.error(Protocol.CMD_UPDATE_STATUS, "Lỗi cập nhật CSDL MySQL.");
+        }
+        if (storedResultFileName != null) {
+            db.updateTicketAttachment(req.ticketId, storedResultFileName);
         }
         db.recordAuditEvent("TICKET_PROGRESS_UPDATED", req.ticketId, user.username,
                 "Tiến độ " + req.progressPercent + "%; trạng thái " + effectiveStatus);
 
         // 6. Phát thông báo thay đổi trạng thái tới các Socket (F06)
         if (broadcaster != null) {
-            String msg = "Yêu cầu [" + req.ticketId + "] cập nhật tiến độ: " + req.progressPercent + "% (" + effectiveStatus + ")";
+            String noteText = (req.note != null && !req.note.isBlank())
+                    ? " | Ghi chú: " + req.note.trim() : "";
+            String msg = "Yêu cầu [" + req.ticketId + "] cập nhật tiến độ: "
+                    + req.progressPercent + "% (" + effectiveStatus + ")" + noteText;
             broadcaster.broadcast("STATUS_CHANGED", req.ticketId, msg);
         }
 
@@ -135,5 +150,15 @@ public class F05_UpdateProgress {
         );
 
         return Protocol.Packet.success(Protocol.CMD_UPDATE_STATUS, resp.message, resp);
+    }
+
+    private static void deleteStoredResultFile(String fileName) {
+        if (fileName == null) return;
+        try {
+            FileTransferHelper.deleteStoredFile(fileName);
+        } catch (java.io.IOException e) {
+            System.err.println("[F05] Không thể dọn tệp nghiệm thu sau khi cập nhật thất bại: "
+                    + e.getMessage());
+        }
     }
 }

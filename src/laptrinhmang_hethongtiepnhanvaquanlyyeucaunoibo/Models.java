@@ -14,15 +14,22 @@ public class Models {
         public String displayName;
         public String role; // "admin", "tech", "requester"
         public String status; // "Đang hoạt động", "Đã khóa"
+        public String department;
 
         public User() {}
 
         public User(String username, String password, String displayName, String role, String status) {
+            this(username, password, displayName, role, status, "");
+        }
+
+        public User(String username, String password, String displayName, String role, String status,
+                    String department) {
             this.username = username;
             this.password = password;
             this.displayName = displayName;
             this.role = role;
             this.status = status;
+            this.department = department;
         }
 
         public String getRoleName() {
@@ -51,6 +58,10 @@ public class Models {
         public int progress; // 0 - 100%
         public String attachmentName; // Tên file đính kèm
         public String slaDueAt;
+        public String createdAt;
+        public String latestNote;
+        public String ownerDepartment;
+        public String sourceIp;
         public boolean deleted;
         public boolean slaWarningSent;
         public boolean slaOverdueSent;

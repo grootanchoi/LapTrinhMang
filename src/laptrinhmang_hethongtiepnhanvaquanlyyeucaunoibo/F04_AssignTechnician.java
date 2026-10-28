@@ -102,7 +102,9 @@ public class F04_AssignTechnician {
         // Thông báo qua Socket tới kỹ thuật viên và người gửi (F06)
         if (broadcaster != null) {
             String msg = "Yêu cầu [" + req.ticketId + "] đã được phân công cho kỹ thuật viên: " + req.techUsername;
-            broadcaster.broadcast("TICKET_ASSIGNED", req.ticketId, msg);
+            broadcaster.sendToUsers(java.util.List.of(t.owner, req.techUsername, t.assignedTech),
+                    "TICKET_ASSIGNED", req.ticketId, msg);
+            broadcaster.sendToRole("admin", "TICKET_ASSIGNED", req.ticketId, msg);
         }
 
         return Protocol.Packet.success(Protocol.CMD_ASSIGN_TECH, "Phân công thành công cho: " + req.techUsername, null);
@@ -129,7 +131,7 @@ public class F04_AssignTechnician {
         boolean canViewTicket = ticket != null && ("admin".equalsIgnoreCase(user.role)
                 || ("requester".equalsIgnoreCase(user.role) && user.username.equalsIgnoreCase(ticket.owner))
                 || ("tech".equalsIgnoreCase(user.role)
-                    && (user.username.equalsIgnoreCase(ticket.assignedTech) || "Mới".equalsIgnoreCase(ticket.status))));
+                    && user.username.equalsIgnoreCase(ticket.assignedTech)));
         if (!canViewTicket || !fileName.equals(ticket.attachmentName)) {
             return Protocol.Packet.error(Protocol.CMD_DOWNLOAD_FILE, "Bạn không có quyền tải tệp của yêu cầu này.");
         }

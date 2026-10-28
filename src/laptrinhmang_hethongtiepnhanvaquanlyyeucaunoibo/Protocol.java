@@ -63,6 +63,7 @@ public class Protocol {
         public String status;
         public String message;
         public Object data;
+        public String correlationId;
 
         public Packet(String command) {
             this.command = command;

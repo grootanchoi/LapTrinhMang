@@ -14,8 +14,11 @@ CREATE TABLE IF NOT EXISTS `users` (
     `display_name` VARCHAR(100) NOT NULL,
     `role` ENUM('requester', 'tech', 'admin') NOT NULL DEFAULT 'requester',
     `status` VARCHAR(30) NOT NULL DEFAULT 'Đang hoạt động',
+    `department` VARCHAR(100) NOT NULL DEFAULT '',
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+ALTER TABLE `users`
+    ADD COLUMN IF NOT EXISTS `department` VARCHAR(100) NOT NULL DEFAULT '';
 
 -- 2. Bảng yêu cầu hỗ trợ (Tickets) - F02, F03, F04, F05, F06
 CREATE TABLE IF NOT EXISTS `tickets` (
@@ -30,6 +33,9 @@ CREATE TABLE IF NOT EXISTS `tickets` (
     `detail` TEXT,
     `progress` INT DEFAULT 0,
     `attachment_name` VARCHAR(255) DEFAULT '',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `owner_department` VARCHAR(100) NOT NULL DEFAULT '',
+    `source_ip` VARCHAR(45) NOT NULL DEFAULT '',
     `sla_due_at` DATETIME NULL,
     `sla_warning_sent` BOOLEAN NOT NULL DEFAULT FALSE,
     `sla_overdue_sent` BOOLEAN NOT NULL DEFAULT FALSE,
@@ -38,11 +44,13 @@ CREATE TABLE IF NOT EXISTS `tickets` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 ALTER TABLE `tickets`
+    ADD COLUMN IF NOT EXISTS `created_at` DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00',
+    ADD COLUMN IF NOT EXISTS `owner_department` VARCHAR(100) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS `source_ip` VARCHAR(45) NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS `sla_due_at` DATETIME NULL,
     ADD COLUMN IF NOT EXISTS `sla_warning_sent` BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS `sla_overdue_sent` BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS `deleted_at` DATETIME NULL;
-
 -- 3. Bảng lịch sử xử lý (Ticket History) - F05, F10
 CREATE TABLE IF NOT EXISTS `ticket_history` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -129,8 +137,21 @@ INSERT INTO `users` (`username`, `password`, `display_name`, `role`, `status`) V
 ('user02', 'pbkdf2-sha256$210000$0767svk+/9KMBNwZWSBAVA==$5Miuqkc5IOV1LL1Z5v3kOG35wpnQodqtIqiLWZs5dSA=', 'Phạm Thị Kế Toán', 'requester', 'Đang hoạt động')
 ON DUPLICATE KEY UPDATE `username`=`username`;
 
+UPDATE `users` SET `department` = 'IT' WHERE `username` = 'user01' AND `department` = '';
+UPDATE `users` SET `department` = 'Kế toán' WHERE `username` = 'user02' AND `department` = '';
+UPDATE `users` SET `department` = 'IT'
+WHERE `username` IN ('admin', 'tech01', 'tech02') AND `department` = '';
+
 -- Thêm các yêu cầu mẫu ban đầu
-INSERT INTO `tickets` (`id`, `title`, `category`, `priority`, `created_date`, `status`, `owner`, `assigned_tech`, `detail`, `progress`, `attachment_name`) VALUES
-('YC-2026-0001', 'Máy in phòng Kế toán không nhận lệnh in', 'Hành chính', 'Cao', '2026-10-20', 'Đang xử lý', 'user02', 'tech01', 'Máy in Canon 2900 báo lỗi offline liên tục, đã khởi động lại nhưng không được.', 40, 'error_printer.txt'),
-('YC-2026-0002', 'Xin cấp quyền truy cập VPN nội bộ làm việc từ xa', 'IT', 'Bình thường', '2026-10-21', 'Mới', 'user01', 'Chưa phân công', 'Cần tài khoản VPN kết nối máy chủ dữ liệu từ chi nhánh.', 0, '')
+INSERT INTO `tickets` (`id`, `title`, `category`, `priority`, `created_date`, `created_at`, `status`, `owner`, `assigned_tech`, `detail`, `progress`, `attachment_name`) VALUES
+('YC-2026-0001', 'Máy in phòng Kế toán không nhận lệnh in', 'Hành chính', 'Cao', '2026-10-20', '2026-10-20 08:00:00', 'Đang xử lý', 'user02', 'tech01', 'Máy in Canon 2900 báo lỗi offline liên tục, đã khởi động lại nhưng không được.', 40, 'error_printer.txt'),
+('YC-2026-0002', 'Xin cấp quyền truy cập VPN nội bộ làm việc từ xa', 'IT', 'Bình thường', '2026-10-21', '2026-10-21 08:00:00', 'Mới', 'user01', 'Chưa phân công', 'Cần tài khoản VPN kết nối máy chủ dữ liệu từ chi nhánh.', 0, '')
 ON DUPLICATE KEY UPDATE `id`=`id`;
+UPDATE `tickets` SET `created_at` = COALESCE(
+    STR_TO_DATE(CONCAT(`created_date`, ' 08:00:00'), '%Y-%m-%d %H:%i:%s'),
+    '1970-01-01 00:00:00')
+WHERE `created_at` = '1970-01-01 00:00:00';
+UPDATE `tickets` t
+JOIN `users` u ON u.`username` = t.`owner`
+SET t.`owner_department` = u.`department`
+WHERE t.`owner_department` = '';

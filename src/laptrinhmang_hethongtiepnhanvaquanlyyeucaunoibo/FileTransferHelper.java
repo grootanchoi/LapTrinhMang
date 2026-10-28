@@ -1,6 +1,9 @@
 package laptrinhmang_hethongtiepnhanvaquanlyyeucaunoibo;
 
 import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 
 /**
  * Tiện ích truyền tải tệp tin qua Socket TCP với cơ chế chia nhỏ buffer (Chunking)
@@ -14,6 +17,7 @@ public class FileTransferHelper {
     }
 
     public static final String SERVER_STORAGE_DIR = "server_storage";
+    public static final long MAX_ATTACHMENT_SIZE = 10L * 1024 * 1024;
 
     static {
         File dir = new File(SERVER_STORAGE_DIR);
@@ -76,5 +80,47 @@ public class FileTransferHelper {
             }
             bos.flush();
         }
+    }
+
+    public static String storeTicketAttachment(String ticketId, String originalName, byte[] bytes)
+            throws IOException {
+        if (ticketId == null || !ticketId.matches("[A-Za-z0-9._-]+")) {
+            throw new IOException("Mã yêu cầu không hợp lệ.");
+        }
+        if (originalName == null || originalName.isBlank()
+                || originalName.contains("/") || originalName.contains("\\")
+                || originalName.equals(".") || originalName.equals("..")) {
+            throw new IOException("Tên tệp không hợp lệ.");
+        }
+        if (bytes == null || bytes.length == 0 || bytes.length > MAX_ATTACHMENT_SIZE) {
+            throw new IOException("Kích thước tệp không hợp lệ.");
+        }
+
+        String safeName = originalName.replaceAll("[^\\p{L}\\p{N}._-]", "_");
+        if (safeName.length() > 120) safeName = safeName.substring(safeName.length() - 120);
+        String storedName = ticketId + "_" + safeName;
+        Path storage = Path.of(SERVER_STORAGE_DIR).toAbsolutePath().normalize();
+        Files.createDirectories(storage);
+        Path destination = storage.resolve(storedName).normalize();
+        if (!destination.startsWith(storage)) throw new IOException("Đường dẫn tệp không hợp lệ.");
+        Files.write(destination, bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+        return storedName;
+    }
+
+    public static void deleteStoredFile(String fileName) throws IOException {
+        if (fileName == null || fileName.isBlank()
+                || fileName.contains("/") || fileName.contains("\\")) {
+            throw new IOException("Tên tệp không hợp lệ.");
+        }
+        Path storage = Path.of(SERVER_STORAGE_DIR).toAbsolutePath().normalize();
+        Path target = storage.resolve(fileName).normalize();
+        if (!target.startsWith(storage)) throw new IOException("Đường dẫn tệp không hợp lệ.");
+        Files.deleteIfExists(target);
+    }
+
+    public static String getOriginalTicketAttachmentName(String ticketId, String storedName) {
+        String prefix = ticketId + "_";
+        return storedName != null && storedName.startsWith(prefix)
+                ? storedName.substring(prefix.length()) : storedName;
     }
 }

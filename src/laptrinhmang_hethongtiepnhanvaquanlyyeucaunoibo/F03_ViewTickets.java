@@ -66,8 +66,7 @@ public class F03_ViewTickets {
         }
         boolean allowed = "admin".equalsIgnoreCase(user.role)
                 || ("requester".equalsIgnoreCase(user.role) && user.username.equalsIgnoreCase(t.owner))
-                || ("tech".equalsIgnoreCase(user.role)
-                    && (user.username.equalsIgnoreCase(t.assignedTech) || "Mới".equalsIgnoreCase(t.status)));
+                || ("tech".equalsIgnoreCase(user.role) && user.username.equalsIgnoreCase(t.assignedTech));
         if (!allowed) {
             return Protocol.Packet.error(Protocol.CMD_GET_TICKET_DETAIL, "Bạn không có quyền xem yêu cầu này.");
         }

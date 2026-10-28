@@ -23,6 +23,7 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 
 set "WORKDESK_TLS="
+set "WORKDESK_ALLOWED_CIDRS=127.0.0.0/8,::1/128"
 set "WORKDESK_KEYSTORE="
 set "WORKDESK_KEYSTORE_PASSWORD="
 set "WORKDESK_TRUSTSTORE="

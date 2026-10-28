@@ -59,6 +59,41 @@ public class F06_NotificationBroadcaster {
         return activeSessions.size();
     }
 
+    public boolean hasActiveSession(String username, String excludedSessionId) {
+        return activeSessions.stream().anyMatch(session -> session.isConnected()
+                && !session.getSessionId().equals(excludedSessionId)
+                && username.equalsIgnoreCase(session.getUsername()));
+    }
+
+    public void terminateUserSessions(String username, String message) {
+        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss dd/MM"));
+        Models.NotificationMessage notification =
+                new Models.NotificationMessage("SESSION_REVOKED", "", message, timestamp);
+        Protocol.Packet packet = new Protocol.Packet(
+                Protocol.CMD_NOTIFICATION, Protocol.STATUS_SUCCESS, message, notification);
+        for (ClientSessionHolder session : activeSessions) {
+            if (!session.isConnected() || !username.equalsIgnoreCase(session.getUsername())) continue;
+            try {
+                ObjectOutputStream output = session.getOutputStream();
+                synchronized (output) {
+                    output.writeObject(packet);
+                    output.flush();
+                    output.reset();
+                }
+                session.closeConnection();
+            } catch (IOException e) {
+                System.err.println("[F06] Không thể thu hồi phiên " + session.getSessionId()
+                        + " của " + username + ": " + e.getMessage());
+                try {
+                    session.closeConnection();
+                } catch (IOException closeError) {
+                    System.err.println("[F06] Không thể đóng phiên bị thu hồi "
+                            + session.getSessionId() + ": " + closeError.getMessage());
+                }
+            }
+        }
+    }
+
     public java.util.Map<String, Integer> getSessionCountsByRole() {
         java.util.Map<String, Integer> counts = new java.util.HashMap<>();
         for (ClientSessionHolder session : activeSessions) {
