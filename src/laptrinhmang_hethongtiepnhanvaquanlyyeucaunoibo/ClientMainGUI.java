@@ -472,7 +472,7 @@ public class ClientMainGUI {
         lblUser.setForeground(new Color(220, 235, 255));
         lblUser.setFont(new Font("Segoe UI", Font.BOLD, 13));
 
-        JButton btnUsers = createStyledButton("Quản lý tài khoản (F08)", new Color(25, 135, 84), Color.WHITE, 12);
+        JButton btnUsers = createStyledButton("Quản lý tài khoản", new Color(25, 135, 84), Color.WHITE, 12);
         btnUsers.setVisible(isAdmin);
         btnUsers.addActionListener(e -> showUserManagementWindow());
 
@@ -504,16 +504,16 @@ public class ClientMainGUI {
         JPanel leftActions = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
         leftActions.setOpaque(false);
 
-        JButton btnNewTicket = createStyledButton("+  Tạo yêu cầu mới (F02)", new Color(13, 110, 253), Color.WHITE, 13);
+        JButton btnNewTicket = createStyledButton("+  Tạo yêu cầu mới", new Color(13, 110, 253), Color.WHITE, 13);
         btnNewTicket.setVisible(isRequester);
         btnNewTicket.addActionListener(e -> showCreateTicketDialog());
 
-        JButton btnExportFile = createStyledButton("Xuất danh sách ra File (F03)", Color.WHITE, new Color(20, 35, 60), 13);
+        JButton btnExportFile = createStyledButton("Xuất danh sách ra File", Color.WHITE, new Color(20, 35, 60), 13);
         btnExportFile.addActionListener(e -> exportTicketListToFile());
 
         JButton btnRefresh = createStyledButton("Làm mới danh sách", Color.WHITE, new Color(20, 35, 60), 13);
         btnRefresh.addActionListener(e -> requestTicketList());
-        JButton btnStats = createStyledButton("Thống kê (F09)", new Color(111, 66, 193), Color.WHITE, 12);
+        JButton btnStats = createStyledButton("Thống kê", new Color(111, 66, 193), Color.WHITE, 12);
         btnStats.addActionListener(e -> showStatisticsDialog());
 
         leftActions.add(btnNewTicket);
@@ -530,7 +530,7 @@ public class ClientMainGUI {
         JComboBox<String> cbStatus = new JComboBox<>(new String[]{"Tất cả trạng thái", "Mới", "Đang xử lý", "Hoàn thành", "Đã hủy"});
         JComboBox<String> cbCategory = new JComboBox<>(new String[]{"Tất cả danh mục", "IT - Phần cứng", "Mạng & Internet", "Phần mềm & Cấp quyền", "Nhân sự", "Hành chính", "Tài chính"});
         JComboBox<String> cbPriority = new JComboBox<>(new String[]{"Tất cả ưu tiên", "Thấp", "Bình thường", "Cao", "Khẩn cấp"});
-        JButton btnSearch = createStyledButton("Tìm / Lọc (F07)", BLUE, Color.WHITE, 12);
+        JButton btnSearch = createStyledButton("Tìm / Lọc", BLUE, Color.WHITE, 12);
         JPanel filterControls = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0)); filterControls.setOpaque(false);
         filterControls.add(new JLabel("Tìm kiếm:")); filterControls.add(txtSearch); filterControls.add(cbStatus); filterControls.add(cbCategory); filterControls.add(cbPriority); filterControls.add(btnSearch);
         searchBox.add(filterControls, BorderLayout.CENTER);
@@ -611,14 +611,14 @@ public class ClientMainGUI {
         JPanel secondaryActions = new JPanel(new GridLayout(1, 0, 6, 0));
         secondaryActions.setOpaque(false);
 
-        JButton btnAssign = createStyledButton("Phân công (F04)", new Color(13, 110, 253), Color.WHITE, 12);
+        JButton btnAssign = createStyledButton("Phân công", new Color(13, 110, 253), Color.WHITE, 12);
         btnAssign.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) { JOptionPane.showMessageDialog(mainFrame, "Vui lòng chọn một yêu cầu cần phân công."); return; }
             showAssignDialog((String) table.getValueAt(row, 0));
         });
 
-        JButton btnUpdateStatus = createStyledButton("Tiến độ (F05)", new Color(25, 135, 84), Color.WHITE, 12);
+        JButton btnUpdateStatus = createStyledButton("Tiến độ", new Color(25, 135, 84), Color.WHITE, 12);
         btnUpdateStatus.addActionListener(e -> {
             int row = table.getSelectedRow();
             if (row < 0) { JOptionPane.showMessageDialog(mainFrame, "Vui lòng chọn một yêu cầu cần cập nhật."); return; }
@@ -638,7 +638,7 @@ public class ClientMainGUI {
             downloadAttachmentFile(ticketId, fileName);
         });
 
-        JButton btnChat = createStyledButton("Trao đổi (F11)", new Color(111, 66, 193), Color.WHITE, 12);
+        JButton btnChat = createStyledButton("Trao đổi", new Color(111, 66, 193), Color.WHITE, 12);
         chatActionButton = btnChat;
         btnChat.addActionListener(e -> {
             int row = table.getSelectedRow();
@@ -653,7 +653,7 @@ public class ClientMainGUI {
             if (ticket != null) showTicketChatDialog(ticket);
         });
 
-        JButton btnHistory = createStyledButton("Lịch sử & Đánh giá (F10)",
+        JButton btnHistory = createStyledButton("Lịch sử & Đánh giá",
                 new Color(111, 66, 193), Color.WHITE, 12);
         btnHistory.addActionListener(e -> {
             Models.Ticket ticket = getSelectedTicket();
@@ -833,7 +833,7 @@ public class ClientMainGUI {
             Models.Ticket selected = getSelectedTicket();
             if (selected != null) showTicketDetailDialog(selected.id);
         });
-        JButton history = createStyledButton("Lịch sử F10",
+        JButton history = createStyledButton("Lịch sử",
                 new Color(111, 66, 193), Color.WHITE, 11);
         compactInspectorButton(history);
         history.addActionListener(event -> {
@@ -859,7 +859,7 @@ public class ClientMainGUI {
         inspectorChatHost.add(empty, BorderLayout.CENTER);
         JPanel chatSection = new JPanel(new BorderLayout(0, 6));
         chatSection.setOpaque(false);
-        JLabel chatHeading = new JLabel("Trao đổi trực tuyến (F11)");
+        JLabel chatHeading = new JLabel("Trao đổi trực tuyến");
         chatHeading.setFont(new Font("Segoe UI", Font.BOLD, 12));
         chatHeading.setForeground(new Color(71, 85, 105));
         chatSection.add(chatHeading, BorderLayout.NORTH);
@@ -2182,8 +2182,8 @@ public class ClientMainGUI {
         if (chatActionButton == null) return;
         int total = unreadChatCounts.values().stream().mapToInt(Integer::intValue).sum();
         chatActionButton.setText(total == 0
-                ? "Trao đổi trực tuyến (F11)"
-                : "Trao đổi trực tuyến (F11) · Chưa đọc: " + total);
+                ? "Trao đổi trực tuyến"
+                : "Trao đổi trực tuyến · Chưa đọc: " + total);
     }
 
     private void exportTicketListToFile() {
